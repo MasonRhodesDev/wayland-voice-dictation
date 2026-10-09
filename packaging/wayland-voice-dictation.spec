@@ -24,8 +24,11 @@
 %global __cargo_common_opts %{?_smp_mflags} -Z avoid-dev-deps --locked
 
 Name:           wayland-voice-dictation
-Version:        0.6.2
+Version:        0.7.0
 Release:        1%{?dist}
+# Renamed from hyprland-voice-dictation in 0.6.0; replace the old package on upgrade.
+Obsoletes:      hyprland-voice-dictation < 0.6.0
+Provides:       hyprland-voice-dictation = %{version}-%{release}
 Summary:        Offline voice dictation for Wayland desktops with Parakeet speech recognition
 # Project code is MIT OR Apache-2.0; the binary links a large dependency
 # tree — see LICENSE.dependencies generated at build time.
@@ -109,6 +112,14 @@ install -Dpm0755 scripts/download-parakeet-model.sh %{buildroot}%{_datadir}/%{na
 %{_datadir}/%{name}/download-parakeet-model.sh
 
 %changelog
+* Fri Oct 09 2026 Mason Rhodes <mrhodesdev@gmail.com> - 0.7.0-1
+- Engines declare their post-processing stages; [pipeline] overrides them per engine.
+- New openai:gpt-live-transcribe realtime engine with live preview and batch fallback.
+- gpt-transcribe keyword, prompt and language hints from the user dictionary.
+- Optional llm_correction stage on Amazon Bedrock.
+- transcribe-file command for comparing engines and stage lists.
+- Obsolete the old hyprland-voice-dictation package name.
+
 * Sat Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 0.6.2-1
 - Republish so the wayland-voice-dictation COPR project is created with current chroots.
 
