@@ -35,7 +35,7 @@
         {
           "id": "model",
           "label": "Model",
-          "description": "Transcription model (Parakeet).",
+          "description": "Transcription model, format engine:model. parakeet:default runs locally. openai:gpt-live-transcribe streams live text (needs OPENAI_API_KEY); openai:gpt-transcribe uploads once at the end.",
           "type": "enum",
           "options_source": {
             "type": "script",
@@ -64,7 +64,7 @@
         {
           "id": "enable_grammar",
           "label": "Grammar & Spell Checking",
-          "description": "Use Harper for grammar and spelling corrections (developer-friendly). ~10-20ms overhead.",
+          "description": "Global switch for the grammar stage (Harper grammar and spelling). Turning it off removes the stage for every engine; which engines use it is set in the Pipeline section.",
           "type": "boolean",
           "default": true,
           "ui_widget": "toggle"
@@ -80,7 +80,7 @@
         {
           "id": "enable_fuzzy_vocab",
           "label": "Fuzzy Vocabulary Correction",
-          "description": "Snap transcribed words onto your user dictionary to fix vendor/product names and acronyms (e.g. 'life md' → 'lifemd', 'hyperland' → 'hyprland'). Uses dictionary spelling (lowercase). Works with any engine; add terms with 'voice-dictation dict add'.",
+          "description": "Global switch for the fuzzy_vocab stage. Snaps transcribed words onto your user dictionary (e.g. 'life md' to 'lifemd'). Turning it off removes the stage for every engine; which engines use it is set in the Pipeline section.",
           "type": "boolean",
           "default": true,
           "ui_widget": "toggle"
@@ -180,6 +180,129 @@
           "type": "boolean",
           "default": true,
           "ui_widget": "toggle"
+        }
+      ]
+    },
+    {
+      "id": "pipeline",
+      "title": "Pipeline",
+      "description": "Post-processing stages per engine. Each engine declares the stages it needs; set a list here to override it.",
+      "fields": [
+        {
+          "id": "parakeet",
+          "label": "Parakeet Stages",
+          "description": "Stages for local Parakeet models. Declared default: acronyms, punctuation, word_substitution, fuzzy_vocab, grammar. Comma-separated stages from: acronyms, punctuation, word_substitution, fuzzy_vocab, grammar, llm_correction. 'default' uses what the engine declares; 'none' runs nothing.",
+          "type": "string",
+          "default": "default",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "openai",
+          "label": "OpenAI Stages",
+          "description": "Stages for OpenAI models. Declared default: none, because hosted output is already punctuated and uses keywords for vocabulary. Comma-separated stages from: acronyms, punctuation, word_substitution, fuzzy_vocab, grammar, llm_correction. 'default' uses what the engine declares; 'none' runs nothing.",
+          "type": "string",
+          "default": "default",
+          "ui_widget": "text_input"
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "title": "OpenAI",
+      "description": "Settings for openai:* models. The API key comes from OPENAI_API_KEY.",
+      "fields": [
+        {
+          "id": "prompt",
+          "label": "Prompt",
+          "description": "Short description of what you usually dictate, sent as transcription context. Empty sends nothing.",
+          "type": "string",
+          "default": "",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "keywords_from_dictionary",
+          "label": "Dictionary Keywords",
+          "description": "Send user-dictionary words (3+ characters) as keyword hints to gpt-transcribe and gpt-live-transcribe.",
+          "type": "boolean",
+          "default": true,
+          "ui_widget": "toggle"
+        },
+        {
+          "id": "extra_keywords",
+          "label": "Extra Keywords",
+          "description": "Additional comma-separated keyword hints, sent before dictionary words. Keep the original casing, e.g. 'WorkOS, JWKS, CloudFront'.",
+          "type": "string",
+          "default": "",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "languages",
+          "label": "Languages",
+          "description": "Expected languages as comma-separated ISO codes, e.g. 'en'. Empty lets the model detect.",
+          "type": "string",
+          "default": "",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "delay",
+          "label": "Realtime Delay",
+          "description": "gpt-live-transcribe latency versus accuracy. Lower shows text sooner; higher gives the model more context.",
+          "type": "enum",
+          "options_source": {
+            "type": "static",
+            "values": ["minimal", "low", "medium", "high", "xhigh"]
+          },
+          "default": "low",
+          "ui_widget": "dropdown"
+        },
+        {
+          "id": "realtime_url",
+          "label": "Realtime URL",
+          "description": "WebSocket endpoint for realtime transcription. If the stream fails, the utterance is transcribed once with gpt-transcribe instead.",
+          "type": "string",
+          "default": "wss://api.openai.com/v1/realtime?intent=transcription",
+          "ui_widget": "text_input"
+        }
+      ]
+    },
+    {
+      "id": "llm_correction",
+      "title": "LLM Correction",
+      "description": "The llm_correction stage: an Amazon Bedrock pass over the final text that applies spoken self-corrections. Add llm_correction to a Pipeline list to use it. On any failure or timeout the text is kept unchanged.",
+      "fields": [
+        {
+          "id": "model",
+          "label": "Model",
+          "description": "Bedrock model id or inference-profile ARN. Empty disables the stage.",
+          "type": "string",
+          "default": "",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "region",
+          "label": "Region",
+          "description": "AWS region of the model or profile.",
+          "type": "string",
+          "default": "us-west-2",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "aws_profile",
+          "label": "AWS Profile",
+          "description": "Profile for 'aws configure export-credentials' (SSO works). Empty uses AWS_* environment variables, then the default profile.",
+          "type": "string",
+          "default": "",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "timeout_ms",
+          "label": "Timeout",
+          "description": "Milliseconds to wait for the correction before typing the uncorrected text.",
+          "type": "number",
+          "default": 3000,
+          "min": 500,
+          "max": 15000,
+          "ui_widget": "number_input"
         }
       ]
     }

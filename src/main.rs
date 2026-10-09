@@ -56,6 +56,25 @@ enum Commands {
     },
     #[command(about = "List available audio input devices")]
     ListAudioDevices,
+    #[command(
+        about = "Transcribe a WAV through an engine and its post-processing stages",
+        long_about = "Run a 16 kHz mono WAV through the configured engine (or --model) and the\n\
+                      same resolved post-processing stages the daemon uses, then print the raw\n\
+                      and processed text with timings. Use it to compare engines on one clip."
+    )]
+    TranscribeFile {
+        /// Path to a 16 kHz mono 16-bit WAV
+        wav: PathBuf,
+        /// Model spec override, e.g. parakeet:default or openai:gpt-live-transcribe
+        #[arg(long)]
+        model: Option<String>,
+        /// Stage list override, e.g. "acronyms,punctuation" or "none"
+        #[arg(long)]
+        stages: Option<String>,
+        /// Feed audio at speaking speed so partial and final timings match live use
+        #[arg(long)]
+        paced: bool,
+    },
     #[command(about = "Debug recording tools (requires VOICE_DICTATION_DEBUG_AUDIO=1)")]
     Debug {
         #[command(subcommand)]
@@ -1249,6 +1268,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for model in utils::list_final_models(&language) {
                 println!("{}", model);
             }
+        }
+        Commands::TranscribeFile { wav, model, stages, paced } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            let r = rt.block_on(dictation_engine::transcribe_file(
+                &wav,
+                model.as_deref(),
+                stages.as_deref(),
+                paced,
+            ))?;
+            println!("model:      {}", r.model);
+            println!("stages:     {}", r.stages);
+            println!("audio:      {:.1} s", r.audio_secs);
+            match r.first_partial_ms {
+                Some(ms) => println!("partials:   {} (first after {} ms)", r.partials, ms),
+                None => println!("partials:   0"),
+            }
+            println!("final:      {} ms after end of audio", r.final_ms);
+            println!("raw:        {}", r.raw);
+            println!("processed:  {}", r.processed);
         }
         Commands::ListAudioDevices => {
             for dev in utils::list_audio_devices() {

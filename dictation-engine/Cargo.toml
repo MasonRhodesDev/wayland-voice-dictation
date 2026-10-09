@@ -49,6 +49,11 @@ rustfft = "6.4"
 # SHA256 verification for VAD model
 sha2 = "0.10"
 hex = "0.4"
+# SigV4 request signing for the Bedrock llm_correction stage
+hmac = "0.12"
+# WebSocket transport for the OpenAI realtime transcription engine
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+base64 = "0.22"
 # VAD model download
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "rustls-tls"] }
 # PipeWire native audio backend
@@ -66,6 +71,8 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 libc = "0.2"
 
 [dev-dependencies]
+# Guards that exactly one rustls crypto provider is selectable (wss:// panics otherwise)
+rustls = { version = "0.23", default-features = false }
 tempfile = "3"
 
 [lib]

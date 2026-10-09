@@ -23,6 +23,8 @@ use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use tokio::sync::mpsc as tokio_mpsc;
 use tracing::{debug, error};
 
+use crate::post_processing::{Stage, LOCAL_MODEL_STAGES};
+
 /// ~0.15s @ 16kHz: minimum buffered audio before the first partial transcription.
 const MIN_AUDIO_SAMPLES: usize = 2400;
 /// ~0.3s @ 16kHz: new audio required since the last partial before re-transcribing.
@@ -84,6 +86,14 @@ pub trait StreamingEngine: Send + Sync {
 
     /// A copy of the full captured audio buffer (for debug_audio, etc.).
     fn get_audio_buffer(&self) -> Vec<i16>;
+
+    /// The post-processing stages this engine's output needs.
+    ///
+    /// Every engine must declare this explicitly. Local models need the full
+    /// helper chain; hosted models that already return punctuated, cased,
+    /// vocabulary-aware text declare fewer or none. The `[pipeline]` config
+    /// section can still override the list per provider.
+    fn default_stages(&self) -> Vec<Stage>;
 }
 
 /// A pure, synchronous local transcription model: samples in, text out.
@@ -172,6 +182,10 @@ impl StreamingEngine for LocalEngineDriver {
 
     fn get_audio_buffer(&self) -> Vec<i16> {
         self.buffer.lock().map(|b| b.clone()).unwrap_or_default()
+    }
+
+    fn default_stages(&self) -> Vec<Stage> {
+        LOCAL_MODEL_STAGES.to_vec()
     }
 }
 

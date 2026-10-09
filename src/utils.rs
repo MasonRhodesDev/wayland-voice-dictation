@@ -4,7 +4,12 @@ use dictation_engine::audio_backend::{BackendType, DeviceInfo};
 
 /// List available models (Parakeet only)
 pub fn list_models() -> Vec<String> {
-    vec!["parakeet:default".to_string()]
+    vec![
+        "parakeet:default".to_string(),
+        "openai:gpt-live-transcribe".to_string(),
+        "openai:gpt-transcribe".to_string(),
+        "openai:whisper-1".to_string(),
+    ]
 }
 
 /// List preview (fast) models — same as final since Parakeet is the only engine

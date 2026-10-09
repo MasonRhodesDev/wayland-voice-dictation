@@ -16,7 +16,8 @@ use crate::ctc_direct_engine::CtcDirectEngine;
 use crate::ctc_engine::CtcEngine;
 use crate::engine::TranscriptionEngine;
 use crate::hotword_trie;
-use crate::openai_engine::OpenAiEngine;
+use crate::openai_engine::{OpenAiEngine, OpenAiOptions};
+use crate::openai_realtime_engine::{self, OpenAiRealtimeEngine};
 use crate::parakeet_engine::ParakeetEngine;
 use crate::stream_engine::{LocalEngineDriver, LocalModel, StreamingEngine};
 
@@ -27,6 +28,23 @@ pub enum Provider {
     Parakeet,
     /// Hosted OpenAI transcription (batch).
     OpenAi,
+}
+
+impl Provider {
+    /// Config key for this provider (also the `[pipeline]` entry name).
+    pub fn key(self) -> &'static str {
+        match self {
+            Provider::Parakeet => "parakeet",
+            Provider::OpenAi => "openai",
+        }
+    }
+}
+
+/// Engine construction settings beyond the model name. Each provider reads
+/// only its own part.
+#[derive(Debug, Clone, Default)]
+pub struct EngineOptions {
+    pub openai: OpenAiOptions,
 }
 
 /// Parsed model specification from config
@@ -50,11 +68,7 @@ impl ModelSpec {
 
 impl std::fmt::Display for ModelSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let provider = match self.provider {
-            Provider::Parakeet => "parakeet",
-            Provider::OpenAi => "openai",
-        };
-        write!(f, "{}:{}", provider, self.model_name)
+        write!(f, "{}:{}", self.provider.key(), self.model_name)
     }
 }
 
@@ -162,11 +176,36 @@ impl ModelSpec {
     /// selected local model in a `LocalEngineDriver`. This is the daemon's engine
     /// factory; the older `create_engine` (pull-based trait) is retained for
     /// test-loop-ui.
-    pub fn create_streaming_engine(&self, sample_rate: u32) -> Result<Arc<dyn StreamingEngine>> {
+    pub fn create_streaming_engine(
+        &self,
+        sample_rate: u32,
+        options: &EngineOptions,
+    ) -> Result<Arc<dyn StreamingEngine>> {
         match self.provider {
+            Provider::OpenAi if openai_realtime_engine::is_realtime_model(&self.model_name) => {
+                info!(
+                    "Creating OpenAI realtime engine (model '{}', delay '{}', {} keywords)",
+                    self.model_name,
+                    options.openai.delay,
+                    options.openai.keywords.len()
+                );
+                Ok(Arc::new(OpenAiRealtimeEngine::new(
+                    self.model_name.clone(),
+                    sample_rate,
+                    options.openai.clone(),
+                )?))
+            }
             Provider::OpenAi => {
-                info!("Creating OpenAI streaming engine (model '{}')", self.model_name);
-                Ok(Arc::new(OpenAiEngine::new(self.model_name.clone(), sample_rate)?))
+                info!(
+                    "Creating OpenAI streaming engine (model '{}', {} keywords)",
+                    self.model_name,
+                    options.openai.keywords.len()
+                );
+                Ok(Arc::new(OpenAiEngine::new(
+                    self.model_name.clone(),
+                    sample_rate,
+                    options.openai.clone(),
+                )?))
             }
             Provider::Parakeet => {
                 let model = self.build_local_model(sample_rate)?;

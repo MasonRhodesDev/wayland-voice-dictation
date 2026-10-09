@@ -25,6 +25,7 @@ pub mod ime_probe;
 mod keyboard;
 pub mod model_selector;
 pub mod openai_engine;
+pub mod openai_realtime_engine;
 pub mod parakeet_engine;
 pub mod post_processing;
 pub mod stream_engine;
@@ -59,8 +60,13 @@ fn resume_media() {
 use audio_backend::{AudioBackend, AudioBackendConfig, BackendType};
 use dbus_control::DaemonCommand;
 use keyboard::KeyboardInjector;
-use model_selector::ModelSpec;
-use post_processing::{Pipeline, SanitizationProcessor, TextProcessor, WordSubstitutionProcessor};
+use model_selector::{EngineOptions, ModelSpec, Provider};
+use openai_engine::OpenAiConfig;
+use post_processing::stages::{describe as describe_stages, resolve_stages};
+use post_processing::{
+    LlmCorrectionConfig, Pipeline, PipelinePass, SanitizationProcessor, Stage, StageContext,
+    StageSwitches, TextProcessor, WordSubstitutionProcessor,
+};
 use stream_engine::{StreamingEngine, TranscriptEvent};
 use user_dictionary::UserDictionary;
 
@@ -77,6 +83,61 @@ struct RecordingSession {
 #[derive(Debug, Deserialize)]
 struct Config {
     daemon: DaemonConfig,
+    /// Per-provider post-processing stage lists (see `post_processing::stages`).
+    #[serde(default)]
+    pipeline: PipelineConfig,
+    #[serde(default)]
+    openai: OpenAiConfig,
+    #[serde(default)]
+    llm_correction: LlmCorrectionConfig,
+}
+
+/// `[pipeline]`: comma-separated stage names per provider. A missing entry or
+/// `"default"` uses the stages the engine declares; `"none"` runs nothing.
+#[derive(Debug, Default, Deserialize)]
+struct PipelineConfig {
+    #[serde(default)]
+    parakeet: Option<String>,
+    #[serde(default)]
+    openai: Option<String>,
+}
+
+impl PipelineConfig {
+    fn for_provider(&self, provider: Provider) -> Option<&str> {
+        match provider {
+            Provider::Parakeet => self.parakeet.as_deref(),
+            Provider::OpenAi => self.openai.as_deref(),
+        }
+    }
+}
+
+impl Config {
+    /// Legacy `enable_*` flags, applied as global off switches.
+    fn stage_switches(&self) -> StageSwitches {
+        StageSwitches {
+            acronyms: self.daemon.enable_acronyms,
+            punctuation: self.daemon.enable_punctuation,
+            word_substitution: self.daemon.enable_word_substitution,
+            fuzzy_vocab: self.daemon.enable_fuzzy_vocab,
+            grammar: self.daemon.enable_grammar,
+        }
+    }
+
+    /// The stage list for a session: config override, else the engine's
+    /// declaration, then the legacy switches.
+    fn session_stages(&self, spec: &ModelSpec, engine: &dyn StreamingEngine) -> Vec<Stage> {
+        resolve_stages(
+            &engine.default_stages(),
+            self.pipeline.for_provider(spec.provider),
+            self.stage_switches(),
+        )
+    }
+
+    /// Engine construction options. Reads the user dictionary at call time so
+    /// a recreated engine picks up newly added words.
+    fn engine_options(&self, user_dict: &UserDictionary) -> EngineOptions {
+        EngineOptions { openai: self.openai.to_options(&user_dict.app_words()) }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -755,6 +816,9 @@ pub async fn run() -> Result<()> {
                 enable_accessibility_bridge: default_enable_accessibility_bridge(),
                 correction_backend_wezterm: default_correction_backend_wezterm(),
             },
+            pipeline: PipelineConfig::default(),
+            openai: OpenAiConfig::default(),
+            llm_correction: LlmCorrectionConfig::default(),
         }
     });
 
@@ -1107,7 +1171,14 @@ pub async fn run() -> Result<()> {
     // Pre-load engine at startup for instant recording start
     info!("Pre-loading Parakeet engine (blocking call before D-Bus)...");
     let mut preview_engine: Option<Arc<dyn StreamingEngine>> =
-        Some(model_spec.create_streaming_engine(sample_rate)?);
+        Some(model_spec.create_streaming_engine(sample_rate, &config.engine_options(&user_dict))?);
+    if let Some(engine) = preview_engine.as_ref() {
+        info!(
+            "Post-processing stages for {}: {}",
+            model_spec,
+            describe_stages(&config.session_stages(&model_spec, engine.as_ref()))
+        );
+    }
     let mut engine_stopped_at: Option<Instant> = None;
     info!("Parakeet engine loaded and ready");
 
@@ -1221,8 +1292,10 @@ pub async fn run() -> Result<()> {
                             // Recreate engine if it was released due to idle timeout
                             if preview_engine.is_none() {
                                 info!("Recreating transcription engine (was released for idle memory savings)...");
-                                preview_engine =
-                                    Some(model_spec.create_streaming_engine(sample_rate)?);
+                                preview_engine = Some(model_spec.create_streaming_engine(
+                                    sample_rate,
+                                    &config.engine_options(&user_dict),
+                                )?);
                                 health_state.engine_healthy.store(true, Ordering::Relaxed);
                                 info!("Engine recreated and ready");
                             }
@@ -1323,22 +1396,20 @@ pub async fn run() -> Result<()> {
                             // Subscribe before spawning so no early partials are missed.
                             let mut event_rx = session_engine.subscribe();
                             let gui_control_tx_preview = gui_control_tx.clone();
-                            let enable_acronyms = config.daemon.enable_acronyms;
-                            let enable_punctuation = config.daemon.enable_punctuation;
-                            let enable_word_substitution = config.daemon.enable_word_substitution;
-                            let enable_fuzzy_vocab = config.daemon.enable_fuzzy_vocab;
-                            let word_sub_preview = word_sub.clone();
-                            let user_dict_preview = Arc::clone(&user_dict);
+                            let preview_stages =
+                                config.session_stages(&model_spec, session_engine.as_ref());
+                            let preview_ctx = StageContext {
+                                user_dict: Some(Arc::clone(&user_dict)),
+                                word_sub: word_sub.clone(),
+                                llm: None,
+                            };
                             let mut cancel_rx_preview = cancel_tx.subscribe();
                             preview_task = Some(tokio::spawn(async move {
-                                let pipeline = Pipeline::from_config_with_dict(
-                                    enable_acronyms,
-                                    enable_punctuation,
-                                    false, // grammar disabled in preview for speed
-                                    Some(user_dict_preview),
-                                    enable_word_substitution,
-                                    word_sub_preview,
-                                    enable_fuzzy_vocab,
+                                // Preview drops final-only stages (grammar, llm_correction).
+                                let pipeline = Pipeline::from_stages(
+                                    &preview_stages,
+                                    &preview_ctx,
+                                    PipelinePass::Preview,
                                 );
 
                                 let mut last_text = String::new();
@@ -1661,15 +1732,14 @@ pub async fn run() -> Result<()> {
                     info!("Transcription: '{}'", preview_text);
 
                     // Apply post-processing pipeline
-                    let pipeline = Pipeline::from_config_with_dict(
-                        config.daemon.enable_acronyms,
-                        config.daemon.enable_punctuation,
-                        config.daemon.enable_grammar,
-                        Some(Arc::clone(&user_dict)),
-                        config.daemon.enable_word_substitution,
-                        word_sub.clone(),
-                        config.daemon.enable_fuzzy_vocab,
-                    );
+                    let final_stages = config.session_stages(&model_spec, session_engine.as_ref());
+                    let final_ctx = StageContext {
+                        user_dict: Some(Arc::clone(&user_dict)),
+                        word_sub: word_sub.clone(),
+                        llm: Some(config.llm_correction.clone()),
+                    };
+                    let pipeline =
+                        Pipeline::from_stages(&final_stages, &final_ctx, PipelinePass::Final);
                     let processed_result = pipeline.process(&preview_text)?;
 
                     if !pipeline.is_empty() && preview_text != processed_result {
@@ -1688,8 +1758,8 @@ pub async fn run() -> Result<()> {
                             active_device: Some(config.daemon.audio_device.clone()),
                             preview_text: preview_text.clone(),
                             final_text: processed_result.clone(),
-                            preview_engine: "parakeet".to_string(),
-                            accurate_engine: "parakeet".to_string(),
+                            preview_engine: model_spec.to_string(),
+                            accurate_engine: model_spec.to_string(),
                             same_model_used: true,
                         };
                         if let Err(e) =
@@ -1837,4 +1907,213 @@ pub async fn run() -> Result<()> {
         std::process::exit(64);
     }
     Ok(())
+}
+
+/// Result of running one recording through an engine and its stage chain.
+#[derive(Debug)]
+pub struct FileTranscription {
+    pub model: String,
+    pub stages: String,
+    pub raw: String,
+    pub processed: String,
+    pub partials: usize,
+    /// Time from the first audio sent to the first partial transcript.
+    pub first_partial_ms: Option<u128>,
+    /// Time from end of audio (`finish()`) to the final transcript.
+    pub final_ms: u128,
+    pub audio_secs: f32,
+}
+
+/// Run a 16 kHz mono PCM16 WAV through the configured engine (or
+/// `model_override`) and the same resolved stage chain the daemon uses.
+///
+/// `stages_override` replaces the `[pipeline]` entry for this run, using the
+/// same comma-separated syntax.
+///
+/// With `paced`, audio is fed at speaking speed in 100 ms chunks, so partial
+/// and final timings match live dictation. Without it, audio is fed at once.
+pub async fn transcribe_file(
+    wav: &std::path::Path,
+    model_override: Option<&str>,
+    stages_override: Option<&str>,
+    paced: bool,
+) -> Result<FileTranscription> {
+    let config = load_config()?;
+    let mut reader = hound::WavReader::open(wav)
+        .map_err(|e| anyhow::anyhow!("opening {}: {e}", wav.display()))?;
+    let spec_wav = reader.spec();
+    if spec_wav.sample_rate != 16_000 || spec_wav.channels != 1 || spec_wav.bits_per_sample != 16 {
+        anyhow::bail!(
+            "need 16 kHz mono 16-bit WAV, got {} Hz, {} ch, {} bit (convert with: ffmpeg -i in.wav -ac 1 -ar 16000 -sample_fmt s16 out.wav)",
+            spec_wav.sample_rate,
+            spec_wav.channels,
+            spec_wav.bits_per_sample
+        );
+    }
+    let samples: Vec<i16> = reader.samples::<i16>().collect::<std::result::Result<_, _>>()?;
+
+    let spec = ModelSpec::parse(model_override.unwrap_or(&config.daemon.model))?;
+    let user_dict = Arc::new(UserDictionary::new().unwrap_or_else(|_| UserDictionary::empty()));
+    let word_sub = if config.daemon.enable_word_substitution {
+        WordSubstitutionProcessor::new(Some(Arc::clone(&user_dict))).ok()
+    } else {
+        None
+    };
+    let engine = spec.create_streaming_engine(16_000, &config.engine_options(&user_dict))?;
+    let stages = match stages_override {
+        Some(list) => resolve_stages(&engine.default_stages(), Some(list), config.stage_switches()),
+        None => config.session_stages(&spec, engine.as_ref()),
+    };
+
+    engine.reset();
+    let mut rx = engine.subscribe();
+    let started = Instant::now();
+    let mut partials = 0usize;
+    let mut first_partial_ms = None;
+    for chunk in samples.chunks(1_600) {
+        engine.process_audio(chunk)?;
+        if paced {
+            let tick = tokio::time::sleep(Duration::from_millis(100));
+            tokio::pin!(tick);
+            loop {
+                tokio::select! {
+                    _ = &mut tick => break,
+                    ev = rx.recv() => if let Some(TranscriptEvent::Partial(_)) = ev {
+                        partials += 1;
+                        first_partial_ms.get_or_insert(started.elapsed().as_millis());
+                    },
+                }
+            }
+        }
+    }
+
+    let stopped = Instant::now();
+    engine.finish();
+    let raw = loop {
+        match tokio::time::timeout(Duration::from_secs(120), rx.recv()).await {
+            Ok(Some(TranscriptEvent::Partial(_))) => {
+                partials += 1;
+                first_partial_ms.get_or_insert(started.elapsed().as_millis());
+            }
+            Ok(Some(TranscriptEvent::Final(t))) => break t,
+            Ok(Some(TranscriptEvent::Error(e))) => anyhow::bail!("engine error: {e}"),
+            Ok(None) => anyhow::bail!("engine event stream closed before the final transcript"),
+            Err(_) => anyhow::bail!("timed out waiting for the final transcript"),
+        }
+    };
+    let final_ms = stopped.elapsed().as_millis();
+
+    let ctx = StageContext {
+        user_dict: Some(Arc::clone(&user_dict)),
+        word_sub,
+        llm: Some(config.llm_correction.clone()),
+    };
+    let processed = Pipeline::from_stages(&stages, &ctx, PipelinePass::Final).process(&raw)?;
+
+    Ok(FileTranscription {
+        model: spec.to_string(),
+        stages: describe_stages(&stages),
+        raw,
+        processed,
+        partials,
+        first_partial_ms,
+        final_ms,
+        audio_secs: samples.len() as f32 / 16_000.0,
+    })
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    /// A pre-pipeline config (only `[daemon]`) must parse and keep the exact
+    /// legacy stage chain for Parakeet.
+    #[test]
+    fn legacy_config_parses_and_keeps_local_chain() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [daemon]
+            audio_device = "all"
+            sample_rate = "16000"
+            model = "parakeet:default"
+            enable_grammar = true
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.pipeline.parakeet.is_none());
+        let switches = cfg.stage_switches();
+        let stages = resolve_stages(
+            post_processing::LOCAL_MODEL_STAGES,
+            cfg.pipeline.for_provider(Provider::Parakeet),
+            switches,
+        );
+        assert_eq!(stages, post_processing::LOCAL_MODEL_STAGES);
+        assert!(!cfg.llm_correction.is_configured());
+        assert_eq!(cfg.openai.delay, "low");
+    }
+
+    /// The shape the schema TUI writes: every field present, defaults as
+    /// strings ("default", "").
+    #[test]
+    fn tui_written_config_parses() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [daemon]
+            audio_device = "default"
+            sample_rate = "16000"
+            model = "openai:gpt-live-transcribe"
+            enable_grammar = false
+
+            [pipeline]
+            parakeet = "default"
+            openai = "default"
+
+            [openai]
+            prompt = ""
+            keywords_from_dictionary = true
+            extra_keywords = "WorkOS, JWKS"
+            languages = "en"
+            delay = "low"
+            realtime_url = "wss://api.openai.com/v1/realtime?intent=transcription"
+
+            [llm_correction]
+            model = ""
+            region = "us-west-2"
+            aws_profile = ""
+            timeout_ms = 3000
+            "#,
+        )
+        .unwrap();
+        // OpenAI declares no stages, and "default" keeps that.
+        let stages =
+            resolve_stages(&[], cfg.pipeline.for_provider(Provider::OpenAi), cfg.stage_switches());
+        assert!(stages.is_empty());
+        // Grammar switch is global: off for Parakeet too.
+        let local = resolve_stages(
+            post_processing::LOCAL_MODEL_STAGES,
+            cfg.pipeline.for_provider(Provider::Parakeet),
+            cfg.stage_switches(),
+        );
+        assert!(!local.contains(&Stage::Grammar));
+        let opts = cfg.openai.to_options(&[]);
+        assert_eq!(opts.keywords, vec!["WorkOS", "JWKS"]);
+        assert_eq!(opts.languages, vec!["en"]);
+    }
+
+    /// The repository schema must keep parsing and must cover every config
+    /// section the daemon reads, or a TUI save would drop that section.
+    #[test]
+    fn schema_covers_all_config_sections() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../config-schema.json")).unwrap();
+        let ids: Vec<&str> = schema["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        for section in ["daemon", "pipeline", "openai", "llm_correction"] {
+            assert!(ids.contains(&section), "schema is missing section [{section}]");
+        }
+    }
 }

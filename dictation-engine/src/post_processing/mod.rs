@@ -1,8 +1,10 @@
 mod acronym;
 mod fuzzy_vocab;
 mod grammar;
+mod llm_correction;
 mod punctuation;
 mod sanitize;
+pub mod stages;
 mod word_substitution;
 
 use crate::user_dictionary::UserDictionary;
@@ -12,9 +14,11 @@ use std::sync::Arc;
 pub use acronym::AcronymProcessor;
 pub use fuzzy_vocab::FuzzyVocabularyProcessor;
 pub use grammar::GrammarProcessor;
+pub use llm_correction::{LlmCorrectionConfig, LlmCorrectionProcessor};
 pub use punctuation::PunctuationProcessor;
 pub use sanitize::SanitizationProcessor;
 pub use sanitize::SanitizationRules;
+pub use stages::{PipelinePass, Stage, StageContext, StageSwitches, LOCAL_MODEL_STAGES};
 pub use word_substitution::WordSubstitutionProcessor;
 
 /// Trait for text post-processors.
@@ -65,12 +69,12 @@ impl Pipeline {
         )
     }
 
-    /// Create a pipeline from configuration with optional user dictionary and word substitution.
+    /// Create a pipeline from the legacy `enable_*` flags.
     ///
-    /// Enables processors based on configuration flags. Processors are applied
-    /// in order: acronyms → punctuation → word substitution → fuzzy vocabulary
-    /// → grammar. Fuzzy vocabulary runs before grammar so corrected proper
-    /// nouns are already in the user dictionary Harper trusts.
+    /// Kept for callers that predate named stages. It resolves to the local
+    /// model stage chain filtered by the flags, so the result is identical to
+    /// the original hard-coded order: acronyms, punctuation, word
+    /// substitution, fuzzy vocabulary, grammar.
     #[allow(clippy::too_many_arguments)]
     pub fn from_config_with_dict(
         enable_acronyms: bool,
@@ -81,43 +85,16 @@ impl Pipeline {
         word_sub: Option<WordSubstitutionProcessor>,
         enable_fuzzy_vocab: bool,
     ) -> Self {
-        let mut pipeline = Self::new();
-
-        // Apply acronym detection first (a p i → API)
-        if enable_acronyms {
-            pipeline.add_processor(Box::new(AcronymProcessor::new()));
-        }
-
-        // Then apply punctuation (capitalization)
-        if enable_punctuation {
-            pipeline.add_processor(Box::new(PunctuationProcessor::new()));
-        }
-
-        // Apply exact word substitutions (shay moy → chezmoi)
-        if enable_word_substitution {
-            if let Some(ws) = word_sub {
-                pipeline.add_processor(Box::new(ws));
-            }
-        }
-
-        // Snap remaining near-misses onto the user's glossary (life md → lifemd,
-        // hyperland → hyprland). Needs the dictionary as its glossary source.
-        if enable_fuzzy_vocab {
-            if let Some(ref dict) = user_dict {
-                pipeline.add_processor(Box::new(FuzzyVocabularyProcessor::new(Arc::clone(dict))));
-            }
-        }
-
-        // Finally apply grammar checking
-        if enable_grammar {
-            if let Some(dict) = user_dict {
-                pipeline.add_processor(Box::new(GrammarProcessor::new_with_user_dictionary(dict)));
-            } else {
-                pipeline.add_processor(Box::new(GrammarProcessor::new()));
-            }
-        }
-
-        pipeline
+        let switches = StageSwitches {
+            acronyms: enable_acronyms,
+            punctuation: enable_punctuation,
+            word_substitution: enable_word_substitution,
+            fuzzy_vocab: enable_fuzzy_vocab,
+            grammar: enable_grammar,
+        };
+        let stages = stages::resolve_stages(LOCAL_MODEL_STAGES, None, switches);
+        let ctx = StageContext { user_dict, word_sub, llm: None };
+        Self::from_stages(&stages, &ctx, PipelinePass::Final)
     }
 
     /// Process text through all processors in the pipeline.
@@ -137,6 +114,11 @@ impl Pipeline {
     /// Check if the pipeline has any processors.
     pub fn is_empty(&self) -> bool {
         self.processors.is_empty()
+    }
+
+    /// Number of processors in the pipeline.
+    pub fn len(&self) -> usize {
+        self.processors.len()
     }
 }
 

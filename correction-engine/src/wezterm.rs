@@ -180,6 +180,8 @@ pub struct PaneEntry {
 
 /// Abstraction over the wezterm mux so the monitor is testable without a live
 /// wezterm.
+// async_trait marks the boxed future #[must_use]; newer clippy flags that as double.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait WeztermClient: Send + Sync {
     async fn list_panes(&self) -> Result<Vec<PaneEntry>>;
