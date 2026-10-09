@@ -266,7 +266,14 @@ pub fn create_vad(
 
         match silero::SileroVadDetector::ensure_model(&model_dir) {
             Ok(model_path) => {
-                match silero::SileroVadDetector::new(&model_path, vad_threshold, sample_rate) {
+                // ort panics (instead of returning Err) when the ONNX Runtime
+                // library cannot be loaded. Catch it so the dB fallback below
+                // still applies.
+                let created = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    silero::SileroVadDetector::new(&model_path, vad_threshold, sample_rate)
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("ONNX Runtime failed to initialize")));
+                match created {
                     Ok(detector) => {
                         debug!("Using Silero VAD with threshold {}", vad_threshold);
                         return Box::new(detector);
@@ -318,7 +325,8 @@ mod tests {
 
     #[test]
     fn test_create_vad_returns_db_threshold() {
-        // Without silero-vad feature, should always return DbThresholdVad
+        // Works whether Silero loads or falls back to the dB threshold (for
+        // example when the ONNX Runtime library is missing).
         let mut vad = create_vad(true, 0.5, -40.0, 16000);
 
         // Test that it works like DbThresholdVad

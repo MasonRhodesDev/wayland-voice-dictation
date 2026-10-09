@@ -13,6 +13,8 @@ use tracing::{debug, error, info, warn};
 ///
 /// Production: `AtspiConnection` connects to the real AT-SPI2 bus.
 /// Testing: `MockTextChangeSource` injects events from a channel.
+// async_trait marks the boxed future #[must_use]; newer clippy flags that as double.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TextChangeSource: Send + Sync {
     /// Subscribe to text change events. Returns a receiver that yields

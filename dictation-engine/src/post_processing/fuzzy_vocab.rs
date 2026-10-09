@@ -234,6 +234,16 @@ fn soundex_code(c: char) -> Option<char> {
     }
 }
 
+/// Lengths must be close for a fuzzy match. Jaro-Winkler rewards a shared
+/// prefix heavily, so without this guard a common word that merely starts a
+/// longer glossary term gets rewritten ("start" became "stardust"). ASR
+/// spelling variants differ by a character or two ("hyperland"/"hyprland").
+fn similar_length(a: &str, b: &str) -> bool {
+    let (la, lb) = (a.chars().count(), b.chars().count());
+    let shorter = la.min(lb);
+    la.abs_diff(lb) <= (shorter / 4).max(1)
+}
+
 /// Best glossary canonical for a normalized token, or `None` if nothing clears
 /// the confidence bar. Exact matches are handled earlier, so a token equal to a
 /// glossary term returns `None` here (no change needed).
@@ -246,6 +256,9 @@ fn best_fuzzy_match(norm: &str, entries: &[FuzzyEntry]) -> Option<String> {
     for entry in entries {
         if entry.normalized == norm {
             return None; // exact — leave it (already correct)
+        }
+        if !similar_length(norm, &entry.normalized) {
+            continue;
         }
         let sim = strsim::jaro_winkler(norm, &entry.normalized);
         let accept =
@@ -274,6 +287,15 @@ mod tests {
         // Words are loaded eagerly at construction, so the temp file can go now.
         drop(file);
         FuzzyVocabularyProcessor::new(Arc::new(dict))
+    }
+
+    #[test]
+    fn common_word_is_not_snapped_to_longer_prefix_term() {
+        // Regression: "start" scored 0.925 against "stardust" on prefix alone.
+        let p = processor_with(&["stardust", "hyprland"]);
+        assert_eq!(p.process("let's start a new scheme").unwrap(), "let's start a new scheme");
+        // Genuine near-misses still correct.
+        assert_eq!(p.process("open hyperland config").unwrap(), "open hyprland config");
     }
 
     #[test]

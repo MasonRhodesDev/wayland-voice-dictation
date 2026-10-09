@@ -173,6 +173,7 @@ Commands:
   download-model      Download Parakeet model from HuggingFace
   list-audio-devices  List available audio input devices
   diagnose            Show diagnostics (model paths, audio, config)
+  transcribe-file WAV Run a WAV through an engine and its stages (--model, --stages, --paced)
   debug list          List saved debug recordings
   debug play FILE     Play a debug recording
 ```
@@ -197,6 +198,52 @@ grammar_check = true
 ```
 
 Run `voice-dictation diagnose` to inspect the current configuration and model status.
+
+### Engines
+
+Set `model` in `[daemon]` to choose one engine:
+
+| Model | Runs | Live preview | Needs |
+|---|---|---|---|
+| `parakeet:default` | Locally, offline | Yes | The downloaded model |
+| `openai:gpt-live-transcribe` | OpenAI realtime WebSocket | Yes | `OPENAI_API_KEY` |
+| `openai:gpt-transcribe` | OpenAI, one upload when you stop | No | `OPENAI_API_KEY` |
+
+If the realtime stream fails, the realtime engine transcribes the recorded audio once with `gpt-transcribe`, so the utterance is not lost. The OpenAI engines send your user-dictionary words as keyword hints. The `[openai]` section sets the prompt, extra keywords, languages and the realtime delay.
+
+### Post-processing stages
+
+Text helpers are named stages: `acronyms`, `punctuation`, `word_substitution`, `fuzzy_vocab`, `grammar` and `llm_correction`. Each engine declares the stages it needs. Parakeet declares the first five. The OpenAI engines declare none, because their output is already punctuated and uses keyword hints for vocabulary.
+
+The `[pipeline]` section overrides the declaration per engine. `default` keeps the declaration and `none` runs no stages. The `enable_*` switches in `[daemon]` still turn a stage off for every engine.
+
+```toml
+[pipeline]
+parakeet = "acronyms,punctuation,word_substitution,fuzzy_vocab"   # local, without Harper
+openai = "default"                                                # nothing
+```
+
+`grammar` and `llm_correction` run on the final text only, never on the live preview.
+
+To compare engines or stage lists on one recording, convert it to 16 kHz mono and run:
+
+```bash
+voice-dictation transcribe-file clip.wav --model parakeet:default --stages none --paced
+```
+
+### LLM correction
+
+The `llm_correction` stage sends the final text to a model on Amazon Bedrock. It applies spoken self-corrections such as "scratch that" and fixes glossary terms. Add it to a `[pipeline]` list and set the model:
+
+```toml
+[llm_correction]
+model = "arn:aws:bedrock:us-west-2:123456789012:application-inference-profile/abc123"
+region = "us-west-2"
+aws_profile = "my-sso-profile"   # read with `aws configure export-credentials`
+timeout_ms = 3000
+```
+
+On a timeout, an expired credential, or a reply that is not an edit of the input, the stage keeps the original text and logs a warning.
 
 ## Troubleshooting
 
