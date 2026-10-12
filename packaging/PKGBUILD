@@ -11,7 +11,7 @@
 
 pkgname=wayland-voice-dictation
 pkgver=0.7.0
-pkgrel=1
+pkgrel=2
 pkgdesc='Offline voice dictation for Wayland desktops with Parakeet speech recognition'
 arch=('x86_64' 'aarch64')
 options=(!lto)  # onig's C objects become GCC LTO bitcode that ld.lld cannot read (same as game-mode/ring)
