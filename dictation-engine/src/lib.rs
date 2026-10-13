@@ -1803,9 +1803,10 @@ pub async fn run() -> Result<()> {
                     }
 
                     let expected_typing_secs =
-                        (sanitized_result.len() as u64 * profile.word_delay_ms) / 1000;
+                        keyboard::total_word_delay_ms(&sanitized_result, profile.word_delay_ms)
+                            / 1000;
                     if expected_typing_secs > 15 {
-                        warn!("Typing will take ~{}s ({} chars at {}ms/char) — text is already in clipboard if interrupted", expected_typing_secs, sanitized_result.len(), profile.word_delay_ms);
+                        warn!("Typing will take ~{}s ({} words at {}ms/word) — text is already in clipboard if interrupted", expected_typing_secs, sanitized_result.split_whitespace().count(), profile.word_delay_ms);
                     }
                     info!(
                         "Typing final text ({:?} mode, delay={}ms)...",
