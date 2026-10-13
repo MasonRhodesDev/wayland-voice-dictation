@@ -411,14 +411,17 @@ fn confirm_recording() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Daemon not running".into());
     }
 
+    // Send Confirm whatever the state: the daemon handles commands in order and
+    // ignores a Confirm with no session. Bailing here on "idle" would drop a
+    // push-to-talk release that raced ahead of its StartRecording.
     let state = get_state()?;
+    send_confirm()?;
     if state != "recording" {
-        eprintln!("Not in recording state (current: {})", state);
-        return Err("Invalid state".into());
+        println!("Not recording (current: {}), nothing to confirm", state);
+        return Ok(());
     }
 
     println!("Confirming transcription...");
-    send_confirm()?;
 
     thread::sleep(Duration::from_millis(500));
 
