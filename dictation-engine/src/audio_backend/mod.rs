@@ -20,8 +20,15 @@ pub struct AudioBackendConfig {
     pub device_name: Option<String>,
     /// Sample rate in Hz (typically 16000 for speech recognition).
     pub sample_rate: u32,
-    /// RMS threshold below which audio is considered silence.
-    pub silence_threshold: f32,
+}
+
+/// Convert a captured f32 buffer to i16, one output sample per input sample.
+///
+/// Backends forward every buffer, quiet ones included: dropping buffers under
+/// a silence threshold splices pauses out of the timeline the engine sees.
+/// Deciding what is speech is the VAD's job, downstream.
+pub(crate) fn f32_to_i16(data: &[f32]) -> Vec<i16> {
+    data.iter().map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect()
 }
 
 /// Information about an available audio input device.
@@ -253,5 +260,25 @@ fn list_devices_backend(backend_type: BackendType) -> Result<Vec<DeviceInfo>> {
         BackendType::Auto | BackendType::Cpal => cpal_backend::CpalBackend::list_devices(),
         #[cfg(feature = "pipewire")]
         BackendType::Pipewire => pipewire_backend::PipewireBackend::list_devices(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn silent_buffer_keeps_its_length() {
+        // A digitally silent buffer must still come through at full length, so
+        // a deliberate pause keeps its wall-clock duration in the engine buffer.
+        let silence = vec![0.0f32; 480];
+        let out = f32_to_i16(&silence);
+        assert_eq!(out.len(), silence.len());
+        assert!(out.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn conversion_clamps_full_scale() {
+        assert_eq!(f32_to_i16(&[1.0, -1.0, 2.0, -2.0]), vec![32767, -32767, 32767, -32768]);
     }
 }

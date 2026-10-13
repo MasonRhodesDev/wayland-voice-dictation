@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use super::{AudioBackend, AudioBackendConfig, AudioBackendFactory, DeviceInfo};
+use super::{f32_to_i16, AudioBackend, AudioBackendConfig, AudioBackendFactory, DeviceInfo};
 
 /// cpal-based audio capture backend.
 pub struct CpalBackend {
@@ -102,7 +102,6 @@ impl CpalBackend {
         let samples_dropped = Arc::new(AtomicU64::new(0));
 
         let stream_id = device.name().unwrap_or_else(|_| "unknown".to_string());
-        let threshold = config.silence_threshold;
 
         // Clone for error callback
         let error_stream_id = stream_id.clone();
@@ -113,18 +112,8 @@ impl CpalBackend {
             .build_input_stream(
                 &stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    // Pre-filter obviously silent chunks
-                    let rms: f32 =
-                        (data.iter().map(|&s| s * s).sum::<f32>() / data.len() as f32).sqrt();
-                    if rms < threshold {
-                        return; // Skip completely silent chunks
-                    }
-
-                    // Convert to i16
-                    let samples: Vec<i16> = data
-                        .iter()
-                        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-                        .collect();
+                    // Forward quiet chunks too, so pauses keep their duration
+                    let samples = f32_to_i16(data);
 
                     // Send directly via crossbeam channel (no muxer)
                     if cb_tx.try_send(samples).is_err() {

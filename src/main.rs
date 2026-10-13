@@ -1106,6 +1106,8 @@ fn diagnose() -> Result<(), Box<dyn std::error::Error>> {
                 || t.starts_with("preview_model")
                 || t.starts_with("final_model")
                 || t.starts_with("audio_device")
+                || t.starts_with("vad_")
+                || t.starts_with("silence_threshold_db")
             {
                 println!("  {}", t);
                 shown_any = true;
@@ -1129,6 +1131,8 @@ fn diagnose() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Directory: {}", models_dir.display());
     println!("  Encoder:   {}", if encoder_exists { "found" } else { "MISSING" });
     println!("  Decoder:   {}", if decoder_exists { "found" } else { "MISSING" });
+
+    diagnose_vad(&config_path);
 
     // Debug audio status
     let debug_enabled = std::env::var("VOICE_DICTATION_DEBUG_AUDIO")
@@ -1159,6 +1163,47 @@ fn diagnose() -> Result<(), Box<dyn std::error::Error>> {
     check_binary_consistency();
 
     Ok(())
+}
+
+/// Report which VAD the daemon will run, by building it the same way.
+///
+/// Skips the build when the Silero model is not on disk yet, so diagnose never
+/// triggers the download the daemon does on first start.
+fn diagnose_vad(config_path: &std::path::Path) {
+    let config = fs::read_to_string(config_path).unwrap_or_default();
+    let setting = |key: &str| {
+        config.lines().find_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            (k.trim() == key).then(|| v.split('#').next().unwrap_or("").trim().to_string())
+        })
+    };
+    let enabled = setting("vad_enabled").map(|v| v != "false").unwrap_or(true);
+    let threshold = setting("vad_threshold").and_then(|v| v.parse().ok()).unwrap_or(0.5);
+    let threshold_db =
+        setting("silence_threshold_db").and_then(|v| v.parse().ok()).unwrap_or(-60.0);
+    let model_path = dictation_engine::vad::silero_model_path();
+    let model_found = model_path.exists();
+
+    println!("\nVoice activity detection:");
+    println!("  Silero:  {}", if enabled { "enabled" } else { "disabled (vad_enabled = false)" });
+    println!(
+        "  Model:   {} ({})",
+        model_path.display(),
+        if model_found { "found" } else { "MISSING - downloaded on daemon start" }
+    );
+    let active = if !enabled || model_found {
+        dictation_engine::vad::create_vad(enabled, threshold, threshold_db, 16000).name()
+    } else {
+        "unknown until the model is downloaded"
+    };
+    match active {
+        "silero" => println!("  Active:  silero (speech probability > {})", threshold),
+        "db-threshold" => println!("  Active:  db-threshold ({:.1} dB)", threshold_db),
+        other => println!("  Active:  {}", other),
+    }
+    if enabled && active == "db-threshold" {
+        println!("  Silero could not load; check that libonnxruntime.so is installed");
+    }
 }
 
 fn download_model() -> Result<(), Box<dyn std::error::Error>> {
