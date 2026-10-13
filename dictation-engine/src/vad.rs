@@ -13,6 +13,9 @@ pub trait VoiceActivityDetector: Send + Sync {
 
     /// Reset internal state (call between recordings)
     fn reset(&mut self);
+
+    /// Short identifier for logs and diagnostics ("silero" or "db-threshold")
+    fn name(&self) -> &'static str;
 }
 
 /// Simple dB-based VAD (always available)
@@ -50,6 +53,10 @@ impl VoiceActivityDetector for DbThresholdVad {
 
     fn reset(&mut self) {
         // No state to reset
+    }
+
+    fn name(&self) -> &'static str {
+        "db-threshold"
     }
 }
 
@@ -247,6 +254,10 @@ pub mod silero {
             self.buffer.clear();
             self.state = vec![0.0f32; 2 * 64];
         }
+
+        fn name(&self) -> &'static str {
+            "silero"
+        }
     }
 }
 
@@ -297,6 +308,77 @@ pub fn create_vad(
 
     debug!("Using dB threshold VAD with threshold {} dB", silence_threshold_db);
     Box::new(DbThresholdVad::new(silence_threshold_db))
+}
+
+/// Where `create_vad` keeps the Silero model (`silero_vad.onnx`).
+pub fn silero_model_path() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("voice-dictation")
+        .join("models")
+        .join("silero_vad.onnx")
+}
+
+/// Per-session speech statistics, built by feeding the VAD every captured chunk.
+///
+/// Offsets are in samples from the start of the session, so they line up with
+/// the engine's audio buffer (capture forwards every buffer, quiet ones too).
+#[derive(Debug, Default)]
+pub struct SpeechTracker {
+    total: u64,
+    speech: u64,
+    first_speech: Option<u64>,
+    last_speech_end: Option<u64>,
+}
+
+impl SpeechTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one chunk of `len` samples and the VAD's verdict for it.
+    pub fn observe(&mut self, len: usize, is_speech: bool) {
+        let start = self.total;
+        self.total += len as u64;
+        if is_speech {
+            self.speech += len as u64;
+            self.first_speech.get_or_insert(start);
+            self.last_speech_end = Some(self.total);
+        }
+    }
+
+    pub fn total_samples(&self) -> u64 {
+        self.total
+    }
+
+    pub fn speech_samples(&self) -> u64 {
+        self.speech
+    }
+
+    /// Leading silence before the first speech chunk, if any speech was seen.
+    pub fn leading_silence(&self) -> Option<u64> {
+        self.first_speech
+    }
+
+    /// Trailing silence after the last speech chunk, if any speech was seen.
+    pub fn trailing_silence(&self) -> Option<u64> {
+        self.last_speech_end.map(|end| self.total - end)
+    }
+
+    /// One-line summary for logs, with durations in milliseconds.
+    pub fn summary(&self, sample_rate: u32) -> String {
+        let ms = |n: u64| n * 1000 / sample_rate.max(1) as u64;
+        match (self.leading_silence(), self.trailing_silence()) {
+            (Some(lead), Some(trail)) => format!(
+                "{}ms captured, {}ms speech, {}ms leading / {}ms trailing silence",
+                ms(self.total),
+                ms(self.speech),
+                ms(lead),
+                ms(trail)
+            ),
+            _ => format!("{}ms captured, no speech detected", ms(self.total)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -360,5 +442,37 @@ mod tests {
         // Silence should be very negative
         let db = DbThresholdVad::rms_to_db(0.0);
         assert!(db < -90.0);
+    }
+
+    #[test]
+    fn test_create_vad_disabled_is_db_threshold() {
+        assert_eq!(create_vad(false, 0.5, -40.0, 16000).name(), "db-threshold");
+    }
+
+    #[test]
+    fn test_speech_tracker_offsets() {
+        let mut t = SpeechTracker::new();
+        t.observe(1600, false);
+        t.observe(800, true);
+        t.observe(800, false);
+        t.observe(800, true);
+        t.observe(3200, false);
+        assert_eq!(t.total_samples(), 7200);
+        assert_eq!(t.speech_samples(), 1600);
+        assert_eq!(t.leading_silence(), Some(1600));
+        assert_eq!(t.trailing_silence(), Some(3200));
+        assert_eq!(
+            t.summary(16000),
+            "450ms captured, 100ms speech, 100ms leading / 200ms trailing silence"
+        );
+    }
+
+    #[test]
+    fn test_speech_tracker_no_speech() {
+        let mut t = SpeechTracker::new();
+        t.observe(16000, false);
+        assert_eq!(t.leading_silence(), None);
+        assert_eq!(t.trailing_silence(), None);
+        assert_eq!(t.summary(16000), "1000ms captured, no speech detected");
     }
 }

@@ -15,7 +15,7 @@ use std::thread;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use super::{AudioBackend, AudioBackendConfig, AudioBackendFactory, DeviceInfo};
+use super::{f32_to_i16, AudioBackend, AudioBackendConfig, AudioBackendFactory, DeviceInfo};
 
 /// Commands sent to the PipeWire thread.
 enum PwCommand {
@@ -85,7 +85,6 @@ impl AudioBackendFactory for PipewireBackend {
         pw::init();
 
         let sample_rate = config.sample_rate;
-        let silence_threshold = config.silence_threshold;
         let is_running = Arc::new(AtomicBool::new(false));
         let is_running_clone = is_running.clone();
 
@@ -138,7 +137,6 @@ impl AudioBackendFactory for PipewireBackend {
                     control_rx,
                     cb_tx,
                     sample_rate,
-                    silence_threshold,
                     is_running_clone,
                     target_serial,
                 ) {
@@ -320,7 +318,6 @@ fn run_pipewire_thread(
     control_rx: std::sync::mpsc::Receiver<PwCommand>,
     audio_tx: crossbeam_channel::Sender<Vec<i16>>,
     sample_rate: u32,
-    silence_threshold: f32,
     is_running: Arc<AtomicBool>,
     target_serial: Option<u32>,
 ) -> Result<()> {
@@ -343,7 +340,6 @@ fn run_pipewire_thread(
         target_serial,
         stream_name,
         &format_buffer,
-        silence_threshold,
         audio_tx,
         samples_dropped.clone(),
         is_running.clone(),
@@ -408,7 +404,6 @@ fn create_capture_stream(
     target_serial: Option<u32>,
     stream_name: &str,
     format_buffer: &[u8],
-    silence_threshold: f32,
     audio_tx: crossbeam_channel::Sender<Vec<i16>>,
     samples_dropped: Arc<AtomicU64>,
     is_running: Arc<AtomicBool>,
@@ -465,18 +460,8 @@ fn create_capture_stream(
                                 )
                             };
 
-                            // Pre-filter silence
-                            let rms: f32 = (f32_samples.iter().map(|&s| s * s).sum::<f32>()
-                                / f32_samples.len() as f32)
-                                .sqrt();
-                            if rms < silence_threshold {
-                                return;
-                            }
-
-                            let i16_samples: Vec<i16> = f32_samples
-                                .iter()
-                                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-                                .collect();
+                            // Forward quiet buffers too, so pauses keep their duration
+                            let i16_samples = f32_to_i16(f32_samples);
 
                             if !i16_samples.is_empty() && audio_tx.try_send(i16_samples).is_err() {
                                 samples_dropped.fetch_add(1, Ordering::Relaxed);
