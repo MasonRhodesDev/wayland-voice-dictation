@@ -96,6 +96,16 @@
           "ui_widget": "number_input"
         },
         {
+          "id": "min_hold_ms",
+          "label": "Push-to-Talk Minimum Hold",
+          "description": "Holds shorter than this many milliseconds (from start to confirm) are treated as accidental taps and cancelled instead of typed. Also applies to a toggle pressed twice that quickly. Set to 0 to disable.",
+          "type": "number",
+          "default": 250,
+          "min": 0,
+          "max": 2000,
+          "ui_widget": "number_input"
+        },
+        {
           "id": "media_resume_delay_ms",
           "label": "Media Resume Delay",
           "description": "Delay in milliseconds before resuming paused media after recording stops",

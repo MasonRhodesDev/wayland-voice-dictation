@@ -153,9 +153,39 @@ Press `Super+V` to start recording. Press again to confirm and type the transcri
 > than the daemon) or a wedged daemon — `systemctl --user restart voice-dictation` clears
 > the latter.
 
+### Push-to-talk (hold to dictate)
+
+Bind `start` to the key press and `confirm` to its release. Hold the key while you speak; let go to type the result.
+
+```
+# Push-to-talk: hold Super+V
+bind  = SUPER, V, exec, voice-dictation start
+bindr = SUPER, V, exec, voice-dictation confirm
+
+# Hands-free: Super+B starts, Super+B again types
+bind = SUPER, B, exec, voice-dictation toggle
+```
+
+- A hold shorter than `min_hold_ms` (default 250 ms) counts as an accidental tap. It cancels the session and types nothing. Set `min_hold_ms = 0` in `[daemon]` to turn this off.
+- `start` while already recording and `confirm` while idle do nothing, so key repeat and stray releases are harmless.
+- If a release is ever missed, recording keeps going. Press and release again to type, or run `voice-dictation stop` to cancel.
+- Put the hands-free toggle on its own key rather than a modifier variant of the push-to-talk key, so a release of one bind can't confirm the other's session.
+
+### Sway
+
+```
+# Toggle
+bindsym $mod+v exec voice-dictation toggle
+
+# Or push-to-talk on $mod+v with hands-free on $mod+b
+bindsym $mod+v exec voice-dictation start
+bindsym --release $mod+v exec voice-dictation confirm
+bindsym $mod+b exec voice-dictation toggle
+```
+
 ### Other compositors
 
-Any Wayland compositor supporting `wtype` works. Map `voice-dictation toggle` to a key using your compositor's keybind system.
+Any Wayland compositor supporting `wtype` works. Map `voice-dictation toggle` to a key using your compositor's keybind system. For push-to-talk, run `voice-dictation start` on key press and `voice-dictation confirm` on key release.
 
 ## CLI Usage
 
@@ -166,7 +196,7 @@ Commands:
   daemon              Start the dictation engine daemon
   start               Start a recording session
   stop                Cancel recording
-  confirm             Finalize and type the transcription
+  confirm             Finalize and type the transcription (no-op when idle)
   toggle              Start if idle, confirm if recording
   status              Show daemon and subsystem status
   config              Open the configuration TUI

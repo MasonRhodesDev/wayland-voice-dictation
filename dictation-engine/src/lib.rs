@@ -75,7 +75,7 @@ use dbus_control::DaemonState;
 
 // Recording session context
 struct RecordingSession {
-    #[allow(dead_code)]
+    /// When StartRecording was received; measures push-to-talk hold length.
     start_time: Instant,
     engine: Arc<dyn StreamingEngine>,
 }
@@ -177,6 +177,11 @@ struct DaemonConfig {
     #[serde(default = "default_trailing_buffer_ms")]
     trailing_buffer_ms: u64,
 
+    // Push-to-talk: a Confirm arriving sooner than this after StartRecording is
+    // treated as an accidental tap and cancels instead of typing. 0 disables.
+    #[serde(default = "default_min_hold_ms")]
+    min_hold_ms: u64,
+
     // Audio backend selection: "auto" (default), "cpal", or "pipewire"
     #[serde(default = "default_audio_backend")]
     audio_backend: String,
@@ -245,6 +250,9 @@ fn default_debug_audio() -> bool {
 fn default_trailing_buffer_ms() -> u64 {
     750
 }
+fn default_min_hold_ms() -> u64 {
+    250
+}
 fn default_audio_backend() -> String {
     "auto".to_string()
 }
@@ -279,6 +287,24 @@ fn default_correction_backend_wezterm() -> bool {
 /// Convert decibels to linear amplitude (RMS threshold).
 fn db_to_linear(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
+}
+
+/// Push-to-talk: a Confirm arriving less than `min_hold_ms` after the session
+/// started is an accidental tap, so it becomes a cancel and nothing is typed.
+/// `held` is how long the current session has been recording; a `min_hold_ms`
+/// of 0 disables the check.
+fn cancel_accidental_tap(cmd: DaemonCommand, held: Duration, min_hold_ms: u64) -> DaemonCommand {
+    match cmd {
+        DaemonCommand::Confirm if min_hold_ms > 0 && held < Duration::from_millis(min_hold_ms) => {
+            info!(
+                "Confirm after {} ms, under min_hold_ms ({}): cancelling as an accidental tap",
+                held.as_millis(),
+                min_hold_ms
+            );
+            DaemonCommand::StopRecording
+        }
+        cmd => cmd,
+    }
 }
 
 fn load_config() -> Result<Config> {
@@ -805,6 +831,7 @@ pub async fn run() -> Result<()> {
                 silence_threshold_db: default_silence_threshold_db(),
                 debug_audio: default_debug_audio(),
                 trailing_buffer_ms: default_trailing_buffer_ms(),
+                min_hold_ms: default_min_hold_ms(),
                 audio_backend: default_audio_backend(),
                 idle_release_timeout_secs: default_idle_release_timeout_secs(),
                 media_resume_delay_ms: default_media_resume_delay_ms(),
@@ -1253,6 +1280,10 @@ pub async fn run() -> Result<()> {
                     Ok(Some(cmd)) => match cmd {
                         DaemonCommand::StartRecording => {
                             info!("Received StartRecording command");
+                            // Stamp before the slow setup below (window capture,
+                            // engine recreation) so the hold length is what the
+                            // user actually held.
+                            let start_time = Instant::now();
                             // Capture focused window before pausing media (to lock typing target)
                             window_target = window_target::WindowTarget::capture().await;
                             if let Some(ref wt) = window_target {
@@ -1313,7 +1344,7 @@ pub async fn run() -> Result<()> {
 
                             // Create session
                             session = Some(RecordingSession {
-                                start_time: Instant::now(),
+                                start_time,
                                 engine: Arc::clone(&session_engine),
                             });
 
@@ -1492,6 +1523,11 @@ pub async fn run() -> Result<()> {
                             let _ = state_tx.send(daemon_state);
                             info!("Entered Recording state");
                         }
+                        DaemonCommand::Confirm | DaemonCommand::StopRecording => {
+                            // Push-to-talk release with no session (stray release,
+                            // or a press already cancelled): harmless.
+                            debug!("Ignoring {:?} while idle", cmd);
+                        }
                         DaemonCommand::SwitchDevice(name) => {
                             info!(
                                 "Switching audio device to {:?}",
@@ -1543,8 +1579,9 @@ pub async fn run() -> Result<()> {
                                 }
                             }
                         }
-                        _ => {
-                            warn!("Ignoring unexpected command in Idle state");
+                        #[cfg(not(feature = "correction"))]
+                        DaemonCommand::SnapshotCorrection => {
+                            warn!("SnapshotCorrection requested but correction support is not built in");
                         }
                     },
                     Ok(None) => {
@@ -1585,7 +1622,15 @@ pub async fn run() -> Result<()> {
 
                 // Check for D-Bus commands while recording (non-blocking)
                 match tokio::time::timeout(Duration::from_millis(100), command_rx.recv()).await {
-                    Ok(Some(cmd)) => match cmd {
+                    Ok(Some(cmd)) => match cancel_accidental_tap(
+                        cmd,
+                        session.as_ref().map_or(Duration::MAX, |s| s.start_time.elapsed()),
+                        config.daemon.min_hold_ms,
+                    ) {
+                        DaemonCommand::StartRecording => {
+                            // Push-to-talk key-repeat or a second press: already recording.
+                            debug!("Ignoring StartRecording while already recording");
+                        }
                         DaemonCommand::Confirm => {
                             info!("Received Confirm command");
                             daemon_state = DaemonState::Processing;
@@ -2050,6 +2095,7 @@ mod config_tests {
         assert_eq!(stages, post_processing::LOCAL_MODEL_STAGES);
         assert!(!cfg.llm_correction.is_configured());
         assert_eq!(cfg.openai.delay, "low");
+        assert_eq!(cfg.daemon.min_hold_ms, 250);
     }
 
     /// The shape the schema TUI writes: every field present, defaults as
@@ -2115,5 +2161,54 @@ mod config_tests {
         for section in ["daemon", "pipeline", "openai", "llm_correction"] {
             assert!(ids.contains(&section), "schema is missing section [{section}]");
         }
+    }
+}
+
+#[cfg(test)]
+mod push_to_talk_tests {
+    use super::*;
+
+    fn is_cancel(cmd: DaemonCommand) -> bool {
+        matches!(cmd, DaemonCommand::StopRecording)
+    }
+
+    #[test]
+    fn short_hold_confirm_cancels() {
+        let cmd = cancel_accidental_tap(DaemonCommand::Confirm, Duration::from_millis(100), 250);
+        assert!(is_cancel(cmd));
+    }
+
+    #[test]
+    fn long_hold_confirm_types() {
+        let cmd = cancel_accidental_tap(DaemonCommand::Confirm, Duration::from_millis(250), 250);
+        assert!(matches!(cmd, DaemonCommand::Confirm));
+    }
+
+    #[test]
+    fn zero_threshold_disables_the_check() {
+        let cmd = cancel_accidental_tap(DaemonCommand::Confirm, Duration::ZERO, 0);
+        assert!(matches!(cmd, DaemonCommand::Confirm));
+    }
+
+    #[test]
+    fn other_commands_pass_through() {
+        let cmd = cancel_accidental_tap(DaemonCommand::StartRecording, Duration::ZERO, 250);
+        assert!(matches!(cmd, DaemonCommand::StartRecording));
+        let cmd = cancel_accidental_tap(DaemonCommand::StopRecording, Duration::ZERO, 250);
+        assert!(is_cancel(cmd));
+    }
+
+    #[test]
+    fn min_hold_ms_is_configurable() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [daemon]
+            audio_device = "default"
+            sample_rate = "16000"
+            min_hold_ms = 0
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.daemon.min_hold_ms, 0);
     }
 }
