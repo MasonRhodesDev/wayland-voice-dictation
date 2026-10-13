@@ -6,6 +6,12 @@ use tracing::debug;
 
 pub struct KeyboardInjector;
 
+/// Total sleep `type_text_with_progress` adds for `text`, in ms. The delay is
+/// applied once per whitespace-separated word; wtype spawn time comes on top.
+pub fn total_word_delay_ms(text: &str, word_delay_ms: u64) -> u64 {
+    text.split_whitespace().count() as u64 * word_delay_ms
+}
+
 impl KeyboardInjector {
     pub fn new() -> Self {
         Self
@@ -67,6 +73,13 @@ impl KeyboardInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_total_word_delay_counts_words_not_chars() {
+        assert_eq!(total_word_delay_ms("hello   world\nagain ", 50), 150);
+        assert_eq!(total_word_delay_ms("", 50), 0);
+        assert_eq!(total_word_delay_ms("hello world", 0), 0);
+    }
 
     #[test]
     fn test_keyboard_injector_new() {
