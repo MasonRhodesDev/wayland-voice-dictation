@@ -207,6 +207,93 @@
       ]
     },
     {
+      "id": "app_styles",
+      "title": "App Styles",
+      "description": "Per-app writing style. The focused window's class picks a category, and the category picks a style.",
+      "fields": [
+        {
+          "id": "overrides",
+          "label": "Window Class Overrides",
+          "description": "Comma-separated class=category pairs that take precedence over the built-in app list, e.g. 'obsidian=editor, Element=chat'. Categories: terminal, editor, chat, browser, email, general. Classes match case-insensitively; find one with 'hyprctl activewindow'.",
+          "type": "string",
+          "default": "",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "terminal",
+          "label": "Terminal Style",
+          "description": "Writing style for terminal emulators. formal: full casing and grammar. casual: like formal, but drops the period after a single sentence. literal: no sentence casing and no grammar pass. Default: literal.",
+          "type": "enum",
+          "options_source": {
+            "type": "static",
+            "values": ["formal", "casual", "literal"]
+          },
+          "default": "literal",
+          "ui_widget": "dropdown"
+        },
+        {
+          "id": "editor",
+          "label": "Editor Style",
+          "description": "Writing style for code editors. formal: full casing and grammar. casual: like formal, but drops the period after a single sentence. literal: no sentence casing and no grammar pass. Default: literal.",
+          "type": "enum",
+          "options_source": {
+            "type": "static",
+            "values": ["formal", "casual", "literal"]
+          },
+          "default": "literal",
+          "ui_widget": "dropdown"
+        },
+        {
+          "id": "chat",
+          "label": "Chat Style",
+          "description": "Writing style for chat apps such as Discord, Slack, Signal and Telegram. formal: full casing and grammar. casual: like formal, but drops the period after a single sentence. literal: no sentence casing and no grammar pass. Default: casual.",
+          "type": "enum",
+          "options_source": {
+            "type": "static",
+            "values": ["formal", "casual", "literal"]
+          },
+          "default": "casual",
+          "ui_widget": "dropdown"
+        },
+        {
+          "id": "browser",
+          "label": "Browser Style",
+          "description": "Writing style for web browsers. formal: full casing and grammar. casual: like formal, but drops the period after a single sentence. literal: no sentence casing and no grammar pass. Default: formal.",
+          "type": "enum",
+          "options_source": {
+            "type": "static",
+            "values": ["formal", "casual", "literal"]
+          },
+          "default": "formal",
+          "ui_widget": "dropdown"
+        },
+        {
+          "id": "email",
+          "label": "Email Style",
+          "description": "Writing style for email clients such as Thunderbird and Geary. formal: full casing and grammar. casual: like formal, but drops the period after a single sentence. literal: no sentence casing and no grammar pass. Default: formal.",
+          "type": "enum",
+          "options_source": {
+            "type": "static",
+            "values": ["formal", "casual", "literal"]
+          },
+          "default": "formal",
+          "ui_widget": "dropdown"
+        },
+        {
+          "id": "general",
+          "label": "General Style",
+          "description": "Writing style for every app not in another category. formal: full casing and grammar. casual: like formal, but drops the period after a single sentence. literal: no sentence casing and no grammar pass. Default: formal.",
+          "type": "enum",
+          "options_source": {
+            "type": "static",
+            "values": ["formal", "casual", "literal"]
+          },
+          "default": "formal",
+          "ui_widget": "dropdown"
+        }
+      ]
+    },
+    {
       "id": "openai",
       "title": "OpenAI",
       "description": "Settings for openai:* models. The API key comes from OPENAI_API_KEY.",

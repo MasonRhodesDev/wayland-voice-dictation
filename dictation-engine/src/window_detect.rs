@@ -14,6 +14,8 @@ pub enum AppCategory {
     Editor,
     /// Chat/messaging apps - generally safe
     Chat,
+    /// Email clients - generally safe
+    Email,
     /// Everything else - minimal sanitization
     #[default]
     General,
@@ -27,7 +29,17 @@ impl AppCategory {
             "browser" | "web" => AppCategory::Browser,
             "editor" | "code" => AppCategory::Editor,
             "chat" | "messaging" => AppCategory::Chat,
+            "email" | "mail" => AppCategory::Email,
             _ => AppCategory::General,
+        }
+    }
+
+    /// Parse a config value, rejecting unknown names instead of mapping them
+    /// to General.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "general" | "default" => Some(AppCategory::General),
+            other => Some(Self::from_str(other)).filter(|c| *c != AppCategory::General),
         }
     }
 }
@@ -54,6 +66,16 @@ mod tests {
         assert_eq!(AppCategory::from_str("browser"), AppCategory::Browser);
         assert_eq!(AppCategory::from_str("editor"), AppCategory::Editor);
         assert_eq!(AppCategory::from_str("chat"), AppCategory::Chat);
+        assert_eq!(AppCategory::from_str("email"), AppCategory::Email);
+        assert_eq!(AppCategory::from_str("mail"), AppCategory::Email);
         assert_eq!(AppCategory::from_str("anything"), AppCategory::General);
+    }
+
+    #[test]
+    fn test_parse_rejects_unknown() {
+        assert_eq!(AppCategory::parse(" Chat "), Some(AppCategory::Chat));
+        assert_eq!(AppCategory::parse("general"), Some(AppCategory::General));
+        assert_eq!(AppCategory::parse("email"), Some(AppCategory::Email));
+        assert_eq!(AppCategory::parse("chta"), None);
     }
 }

@@ -231,6 +231,27 @@ To compare engines or stage lists on one recording, convert it to 16 kHz mono an
 voice-dictation transcribe-file clip.wav --model parakeet:default --stages none --paced
 ```
 
+### Per-app styles
+
+The window that is focused when you start recording picks a category from its class: terminal, editor, chat, browser, email or general. Each category has a writing style:
+
+| Style | Effect | Default for |
+|---|---|---|
+| `formal` | All configured stages | browser, email, general |
+| `casual` | Like formal, but a single sentence loses its final period | chat (Discord, Slack, Signal, Telegram) |
+| `literal` | Skips the `punctuation` (casing) and `grammar` stages | terminal, editor |
+
+Classes that are not in the built-in list are general, so they behave as before. The daemon log shows the category and style for each recording. The `[app_styles]` section maps extra classes and changes the style per category. Find a window's class with `hyprctl activewindow`.
+
+```toml
+[app_styles]
+overrides = "obsidian=editor, Element=chat"   # class=category, case-insensitive
+chat = "formal"
+terminal = "literal"
+```
+
+A style only removes stages. The OpenAI engines run no stages, so `literal` does not change their casing, but `casual` still drops the final period.
+
 ### LLM correction
 
 The `llm_correction` stage sends the final text to a model on Amazon Bedrock. It applies spoken self-corrections such as "scratch that" and fixes glossary terms. Add it to a `[pipeline]` list and set the model:

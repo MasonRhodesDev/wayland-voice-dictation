@@ -5,6 +5,7 @@ mod llm_correction;
 mod punctuation;
 mod sanitize;
 pub mod stages;
+mod style;
 mod word_substitution;
 
 use crate::user_dictionary::UserDictionary;
@@ -19,6 +20,7 @@ pub use punctuation::PunctuationProcessor;
 pub use sanitize::SanitizationProcessor;
 pub use sanitize::SanitizationRules;
 pub use stages::{PipelinePass, Stage, StageContext, StageSwitches, LOCAL_MODEL_STAGES};
+pub use style::{StylePreset, StyleRules};
 pub use word_substitution::WordSubstitutionProcessor;
 
 /// Trait for text post-processors.
