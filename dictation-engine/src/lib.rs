@@ -12,6 +12,7 @@ use tracing::{debug, error, info, warn};
 mod app_profile;
 pub mod audio_backend;
 mod chunking;
+mod context_sources;
 mod context_words;
 pub mod control_ipc;
 pub mod ctc_direct_engine;
@@ -170,9 +171,9 @@ struct DaemonConfig {
     #[serde(default = "default_enable_fuzzy_vocab")]
     enable_fuzzy_vocab: bool,
 
-    // Context biasing: at recording start, read the focused window title and
-    // (for wezterm) the visible pane text, and bias this one utterance toward
-    // the distinctive words found there. Held in memory only, never saved.
+    // Context biasing: at recording start, read the focused field (AT-SPI),
+    // the wezterm pane and the window title, and bias this one utterance
+    // toward the distinctive words found there. Held in memory only.
     #[serde(default = "default_enable_context_biasing")]
     enable_context_biasing: bool,
 
@@ -1231,6 +1232,8 @@ pub async fn run() -> Result<()> {
     let mut media_was_playing = false;
     let mut _idle_inhibit: Option<idle_inhibit::IdleInhibitor> = None;
     let mut window_target: Option<window_target::WindowTarget> = None;
+    // Context biasing sources (window title, terminal pane, focused field).
+    let context_providers = context_sources::default_providers();
     let mut restart_requested = false;
     // Last injection context, kept so SnapshotCorrection can re-arm monitoring
     #[cfg(feature = "correction")]
@@ -1307,9 +1310,16 @@ pub async fn run() -> Result<()> {
                             let session_context =
                                 match (&window_target, config.daemon.enable_context_biasing) {
                                     (Some(wt), true) => {
-                                        context_words::collect(wt.class(), wt.title())
-                                            .await
-                                            .extract(context_words::MAX_CONTEXT_WORDS)
+                                        let target = context_sources::ContextTarget {
+                                            class: wt.class().to_string(),
+                                            title: wt.title().to_string(),
+                                            pid: wt.pid(),
+                                        };
+                                        let sources =
+                                            context_sources::collect(&context_providers, &target)
+                                                .await;
+                                        debug!("Context sources: {:?}", sources.kinds());
+                                        sources.extract(context_words::MAX_CONTEXT_WORDS)
                                     }
                                     _ => context_words::ContextWords::default(),
                                 };

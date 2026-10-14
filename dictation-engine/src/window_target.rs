@@ -9,6 +9,7 @@ pub struct WindowTarget {
     address: String,
     class: String,
     title: String,
+    pid: Option<u32>,
 }
 
 impl WindowTarget {
@@ -30,9 +31,10 @@ impl WindowTarget {
         let address = value["address"].as_str()?.to_string();
         let class = value["class"].as_str()?.to_string();
         let title = value["title"].as_str().unwrap_or_default().to_string();
+        let pid = value["pid"].as_u64().and_then(|p| u32::try_from(p).ok());
 
         debug!("Captured window: class={}, address={}", class, address);
-        Some(Self { address, class, title })
+        Some(Self { address, class, title, pid })
     }
 
     /// Refocus the captured window before typing.
@@ -58,5 +60,9 @@ impl WindowTarget {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
     }
 }

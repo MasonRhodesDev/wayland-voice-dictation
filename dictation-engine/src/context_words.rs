@@ -1,9 +1,9 @@
 //! Context biasing: distinctive words from what is on screen at recording start.
 //!
 //! When a recording starts, the daemon gathers a little text from the current
-//! context (the focused window title, and the visible wezterm pane when the
-//! target is wezterm), keeps only the distinctive tokens (identifiers and
-//! words outside the common English dictionary) and hands them to the session:
+//! context (see [`crate::context_sources`]), keeps only the distinctive tokens
+//! (identifiers and words outside the common English dictionary) and hands
+//! them to the session:
 //!
 //! - CTC beam search (`CtcDirectEngine`) gets their spoken forms as a
 //!   temporary, lower-weight hotword list.
@@ -15,10 +15,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use harper_core::spell::{Dictionary, MutableDictionary};
-use tracing::debug;
 
 /// Most context words kept for one session. Keeps the hotword trie small and
 /// limits how many glossary entries can misfire.
@@ -27,11 +25,6 @@ pub const MAX_CONTEXT_WORDS: usize = 40;
 /// Longest slice of one source that is scanned. A terminal viewport is far
 /// below this; the bound only guards against a pathological source.
 const MAX_SOURCE_CHARS: usize = 16_000;
-
-/// Budget for reading the terminal pane. Recording start waits on it, so a
-/// slow or wedged `wezterm cli` falls back to the window title alone.
-#[cfg_attr(not(feature = "correction"), allow(dead_code))]
-const TERMINAL_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Shortest token kept. Two-letter tokens are mostly flags and noise.
 const MIN_LEN: usize = 3;
@@ -145,84 +138,10 @@ impl ContextWords {
     }
 }
 
-/// Raw text gathered at recording start, in priority order.
-#[derive(Debug, Clone, Default)]
-pub struct ContextSources {
-    /// Focused window title from hyprctl.
-    pub window_title: Option<String>,
-    /// Text around the cursor in the focused field. Not collected yet; the
-    /// slot exists so a source (IME `surrounding_text`, AT-SPI) can be added
-    /// without changing the filter.
-    pub surrounding_text: Option<String>,
-    /// Visible text of the active wezterm pane.
-    pub terminal_text: Option<String>,
-}
-
-impl ContextSources {
-    /// Filter all sources down to at most `cap` distinctive words.
-    pub fn extract(&self, cap: usize) -> ContextWords {
-        let sources: Vec<&str> = [&self.window_title, &self.surrounding_text, &self.terminal_text]
-            .into_iter()
-            .filter_map(|s| s.as_deref())
-            .collect();
-        ContextWords::new(extract(&sources, cap))
-    }
-}
-
-/// Gather context for a recording into the window with this class and title.
-pub async fn collect(window_class: &str, window_title: &str) -> ContextSources {
-    let title = Some(window_title.to_string()).filter(|t| !t.trim().is_empty());
-    ContextSources {
-        window_title: title,
-        surrounding_text: None,
-        terminal_text: terminal_text(window_class, window_title).await,
-    }
-}
-
-/// Visible text of the active pane when the target is wezterm.
-#[cfg(feature = "correction")]
-async fn terminal_text(window_class: &str, window_title: &str) -> Option<String> {
-    use correction_engine::wezterm::{WeztermCli, WeztermClient};
-
-    if window_class != correction_engine::WEZTERM_WINDOW_CLASS {
-        return None;
-    }
-    let read = async {
-        let cli = WeztermCli::discover()?;
-        let panes = cli.list_panes().await.ok()?;
-        let pane = pick_pane(&panes, window_title)?;
-        cli.get_text(pane).await.ok()
-    };
-    match tokio::time::timeout(TERMINAL_TIMEOUT, read).await {
-        Ok(text) => text,
-        Err(_) => {
-            debug!("context: wezterm pane read timed out");
-            None
-        }
-    }
-}
-
-#[cfg(not(feature = "correction"))]
-async fn terminal_text(_window_class: &str, _window_title: &str) -> Option<String> {
-    None
-}
-
-/// The pane the user is looking at: an active pane whose title appears in
-/// the window title (wezterm titles the window after its active pane), else
-/// the first active pane.
-#[cfg(feature = "correction")]
-fn pick_pane(panes: &[correction_engine::wezterm::PaneEntry], window_title: &str) -> Option<u64> {
-    let active = || panes.iter().filter(|p| p.is_active);
-    active()
-        .find(|p| !p.title.is_empty() && window_title.contains(&p.title))
-        .or_else(|| active().next())
-        .map(|p| p.pane_id)
-}
-
 /// Keep the distinctive tokens from `sources` (highest priority first).
 ///
-/// Sources are taken in order, so every word from the window title outranks
-/// every word from the terminal. Within one source, words seen more often rank
+/// Sources are taken in order, so every word from an earlier source (the
+/// focused field) outranks every word from a later one (the window title). Within one source, words seen more often rank
 /// first, then words seen later (the bottom of a terminal is the most recent).
 /// Duplicates are dropped case- and punctuation-insensitively, keeping the
 /// first spelling.
@@ -491,7 +410,6 @@ mod tests {
     fn empty_sources() {
         assert!(extract(&[], 10).is_empty());
         assert!(extract(&["", "   \n"], 10).is_empty());
-        assert!(ContextSources::default().extract(10).is_empty());
     }
 
     #[test]
@@ -508,22 +426,6 @@ mod tests {
         let b = bounded(&s);
         assert!(b.len() <= MAX_SOURCE_CHARS);
         assert!(b.ends_with("kubectl"));
-    }
-
-    #[cfg(feature = "correction")]
-    #[test]
-    fn pick_pane_prefers_title_match() {
-        use correction_engine::wezterm::PaneEntry;
-        let pane = |pane_id, is_active, title: &str| PaneEntry {
-            pane_id,
-            is_active,
-            title: title.to_string(),
-            workspace: String::new(),
-        };
-        let panes = vec![pane(1, false, "nvim"), pane(2, true, "zsh"), pane(3, true, "nvim")];
-        assert_eq!(pick_pane(&panes, "[1/2] nvim"), Some(3));
-        assert_eq!(pick_pane(&panes, "something else"), Some(2));
-        assert_eq!(pick_pane(&[pane(1, false, "x")], "x"), None);
     }
 
     #[test]
