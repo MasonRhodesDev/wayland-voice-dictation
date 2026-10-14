@@ -12,14 +12,14 @@ use anyhow::Result;
 use ndarray::Array2;
 use ort::session::Session;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
 
 use crate::chunking::{transcribe_chunked_with_timestamps, ChunkConfig, TimestampedChunkResult};
 use crate::ctc_features;
 use crate::engine::TranscriptionEngine;
-use crate::hotword_trie::{self, HotwordTrie};
+use crate::hotword_trie::{self, HotwordEntry, HotwordTrie};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -27,6 +27,9 @@ use crate::hotword_trie::{self, HotwordTrie};
 
 const BLANK_TOKEN_ID: u32 = 1024;
 const DEFAULT_BEAM_WIDTH: usize = 10;
+/// Boost for context hotwords: half the user hotword default
+/// ([`hotword_trie`]'s 2.0), since they were never vetted by the user.
+const CONTEXT_BOOST_SCORE: f32 = 1.0;
 
 /// Minimum number of samples required before attempting transcription (~0.15 s)
 const MIN_AUDIO_SAMPLES: usize = 2400;
@@ -43,8 +46,13 @@ pub struct CtcDirectEngine {
     session: Arc<Mutex<Session>>,
     /// HuggingFace BPE tokenizer for decoding token IDs → text
     tokenizer: Arc<Tokenizer>,
-    /// Hotword prefix trie for beam search score boosting
-    hotword_trie: Arc<HotwordTrie>,
+    /// User hotwords from hotwords.txt, tokenized once at load.
+    user_hotwords: Vec<(HotwordEntry, Vec<u32>)>,
+    /// Trie of the user hotwords alone (used when there is no context).
+    base_trie: Arc<HotwordTrie>,
+    /// Active trie for beam search: user hotwords plus this session's context
+    /// hotwords. Replaced by [`set_context_hotwords`](LocalModel::set_context_hotwords).
+    hotword_trie: RwLock<Arc<HotwordTrie>>,
     /// Beam width for CTC prefix beam search
     beam_width: usize,
     /// Buffered audio samples (i16, mono, 16 kHz)
@@ -91,15 +99,18 @@ impl CtcDirectEngine {
 
         // Load hotword trie
         let hotwords_path = hotword_trie::default_hotwords_path();
-        let hotword_trie = load_hotword_trie(Some(hotwords_path), &tokenizer_path)?;
-        info!("Hotword trie loaded ({} entries)", hotword_trie.len());
+        let user_hotwords = load_hotword_entries(&hotwords_path, &tokenizer)?;
+        let base_trie = Arc::new(HotwordTrie::from_token_sequences(&user_hotwords));
+        info!("Hotword trie loaded ({} entries)", base_trie.len());
 
         let chunk_config = ChunkConfig::new(30, 2, sample_rate);
 
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
             tokenizer: Arc::new(tokenizer),
-            hotword_trie: Arc::new(hotword_trie),
+            user_hotwords,
+            hotword_trie: RwLock::new(Arc::clone(&base_trie)),
+            base_trie,
             beam_width: DEFAULT_BEAM_WIDTH,
             audio_buffer: Arc::new(Mutex::new(Vec::with_capacity(480_000))),
             sample_rate,
@@ -164,7 +175,12 @@ impl CtcDirectEngine {
 
         // Step 4: log_softmax along vocab axis (done inside beam search)
         // Step 5: CTC prefix beam search with hotword boosting
-        let token_ids = ctc_beam_search_decode(&logits_2d, &self.hotword_trie, self.beam_width)?;
+        let trie = self
+            .hotword_trie
+            .read()
+            .map(|t| Arc::clone(&t))
+            .unwrap_or_else(|_| Arc::clone(&self.base_trie));
+        let token_ids = ctc_beam_search_decode(&logits_2d, &trie, self.beam_width)?;
 
         if token_ids.is_empty() {
             return Ok(String::new());
@@ -213,6 +229,24 @@ impl CtcDirectEngine {
 impl crate::stream_engine::LocalModel for CtcDirectEngine {
     fn transcribe(&self, samples: &[i16]) -> anyhow::Result<String> {
         self.transcribe_buffer(samples)
+    }
+
+    fn set_context_hotwords(&self, words: &[String]) {
+        let trie = if words.is_empty() {
+            Arc::clone(&self.base_trie)
+        } else {
+            let context = tokenize_hotwords(
+                &self.tokenizer,
+                words
+                    .iter()
+                    .map(|w| HotwordEntry { text: w.clone(), boost_score: CONTEXT_BOOST_SCORE }),
+            );
+            Arc::new(merge_hotwords(context, &self.user_hotwords))
+        };
+        debug!("CtcDirect: {} context hotwords, trie has {}", words.len(), trie.len());
+        if let Ok(mut slot) = self.hotword_trie.write() {
+            *slot = trie;
+        }
     }
 }
 
@@ -524,26 +558,23 @@ fn top_k_tokens(log_probs: &[f32], k: usize, blank_id: u32) -> Vec<(u32, f32)> {
 // Hotword trie loader
 // ---------------------------------------------------------------------------
 
-fn load_hotword_trie(
-    hotwords_path: Option<PathBuf>,
-    tokenizer_path: &std::path::Path,
-) -> Result<HotwordTrie> {
-    let path = hotwords_path.unwrap_or_else(hotword_trie::default_hotwords_path);
-
+fn load_hotword_entries(
+    path: &std::path::Path,
+    tokenizer: &Tokenizer,
+) -> Result<Vec<(HotwordEntry, Vec<u32>)>> {
     if !path.exists() {
         info!("No hotwords file at {}, hotword boosting disabled", path.display());
-        return Ok(HotwordTrie::empty());
+        return Ok(Vec::new());
     }
+    let entries = hotword_trie::parse_hotwords_file(path)?;
+    Ok(tokenize_hotwords(tokenizer, entries))
+}
 
-    let entries = hotword_trie::parse_hotwords_file(&path)?;
-    if entries.is_empty() {
-        return Ok(HotwordTrie::empty());
-    }
-
-    let tokenizer = Tokenizer::from_file(tokenizer_path)
-        .map_err(|e| anyhow::anyhow!("Failed to load tokenizer for hotwords: {}", e))?;
-
-    let mut token_sequences: Vec<(hotword_trie::HotwordEntry, Vec<u32>)> = Vec::new();
+fn tokenize_hotwords(
+    tokenizer: &Tokenizer,
+    entries: impl IntoIterator<Item = HotwordEntry>,
+) -> Vec<(HotwordEntry, Vec<u32>)> {
+    let mut token_sequences = Vec::new();
     for entry in entries {
         match tokenizer.encode(entry.text.as_str(), false) {
             Ok(encoding) => {
@@ -556,8 +587,17 @@ fn load_hotword_trie(
             }
         }
     }
+    token_sequences
+}
 
-    Ok(HotwordTrie::from_token_sequences(&token_sequences))
+/// One trie from context and user hotwords. User entries go in last so a
+/// hotword in both lists ends with the user's score.
+fn merge_hotwords(
+    mut context: Vec<(HotwordEntry, Vec<u32>)>,
+    user: &[(HotwordEntry, Vec<u32>)],
+) -> HotwordTrie {
+    context.extend_from_slice(user);
+    HotwordTrie::from_token_sequences(&context)
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +633,23 @@ mod tests {
         let tokens = result.unwrap();
         // Should produce [0, 2]
         assert_eq!(tokens, vec![0u32, 2u32]);
+    }
+
+    #[test]
+    fn merged_trie_holds_context_and_user_hotwords() {
+        let user = vec![(HotwordEntry { text: "kubectl".into(), boost_score: 2.0 }, vec![1, 2])];
+        let context = vec![
+            (HotwordEntry { text: "hyprctl".into(), boost_score: CONTEXT_BOOST_SCORE }, vec![3]),
+            (HotwordEntry { text: "kubectl".into(), boost_score: CONTEXT_BOOST_SCORE }, vec![1, 2]),
+        ];
+        let trie = merge_hotwords(context, &user);
+        assert_eq!(trie.len(), 3);
+        assert!(trie.query(&[3]).is_complete);
+        assert!(trie.query(&[1, 2]).is_complete);
+        // The shared prefix keeps the stronger (user) per-token boost.
+        assert_eq!(trie.boost_for_token(&[], 1), 1.0);
+        // Context words boost less than a single-token user hotword would.
+        assert_eq!(trie.boost_for_token(&[], 3), CONTEXT_BOOST_SCORE);
     }
 
     /// Version of beam search callable with a custom blank_id for unit testing.

@@ -94,6 +94,11 @@ pub trait StreamingEngine: Send + Sync {
     /// vocabulary-aware text declare fewer or none. The `[pipeline]` config
     /// section can still override the list per provider.
     fn default_stages(&self) -> Vec<Stage>;
+
+    /// Replace this session's context hotwords (spoken forms, see
+    /// [`crate::context_words`]). An empty list clears them. Only engines that
+    /// bias decoding (CTC beam search) act on this; the rest ignore it.
+    fn set_context_hotwords(&self, _words: &[String]) {}
 }
 
 /// A pure, synchronous local transcription model: samples in, text out.
@@ -103,6 +108,9 @@ pub trait StreamingEngine: Send + Sync {
 /// so implementors stay stateless with respect to the audio buffer.
 pub trait LocalModel: Send + Sync {
     fn transcribe(&self, samples: &[i16]) -> Result<String>;
+
+    /// See [`StreamingEngine::set_context_hotwords`].
+    fn set_context_hotwords(&self, _words: &[String]) {}
 }
 
 /// Control messages from the [`StreamingEngine`] surface to the worker thread.
@@ -121,6 +129,7 @@ enum Ctrl {
 /// contract. Owns the audio buffer and runs the throttled re-transcribe loop on
 /// a dedicated blocking thread (never on the tokio runtime).
 pub struct LocalEngineDriver {
+    model: Arc<dyn LocalModel>,
     buffer: Arc<Mutex<Vec<i16>>>,
     event_tx: Arc<Mutex<Option<tokio_mpsc::UnboundedSender<TranscriptEvent>>>>,
     ctrl_tx: Sender<Ctrl>,
@@ -135,6 +144,7 @@ impl LocalEngineDriver {
         let (ctrl_tx, ctrl_rx) = unbounded();
 
         let worker = {
+            let model = Arc::clone(&model);
             let buffer = Arc::clone(&buffer);
             let event_tx = Arc::clone(&event_tx);
             std::thread::Builder::new()
@@ -143,7 +153,7 @@ impl LocalEngineDriver {
                 .expect("failed to spawn LocalEngineDriver worker thread")
         };
 
-        Self { buffer, event_tx, ctrl_tx, worker: Mutex::new(Some(worker)) }
+        Self { model, buffer, event_tx, ctrl_tx, worker: Mutex::new(Some(worker)) }
     }
 }
 
@@ -186,6 +196,10 @@ impl StreamingEngine for LocalEngineDriver {
 
     fn default_stages(&self) -> Vec<Stage> {
         LOCAL_MODEL_STAGES.to_vec()
+    }
+
+    fn set_context_hotwords(&self, words: &[String]) {
+        self.model.set_context_hotwords(words);
     }
 }
 

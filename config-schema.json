@@ -86,6 +86,14 @@
           "ui_widget": "toggle"
         },
         {
+          "id": "enable_context_biasing",
+          "label": "Context Biasing",
+          "description": "At recording start, read the focused window title (and the visible pane text when the target is wezterm) and bias that one utterance toward distinctive words found there: identifiers and words outside the English dictionary. Boosts them in CTC beam search and adds them to fuzzy vocabulary matching for every engine. The words are held in memory for that recording only and never saved. Turn off to stop reading on-screen context.",
+          "type": "boolean",
+          "default": true,
+          "ui_widget": "toggle"
+        },
+        {
           "id": "trailing_buffer_ms",
           "label": "Trailing Audio Buffer",
           "description": "Duration in milliseconds to continue recording after stop command (captures final words that might otherwise be cut off)",

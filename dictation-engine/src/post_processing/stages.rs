@@ -21,6 +21,7 @@ use super::{
     AcronymProcessor, FuzzyVocabularyProcessor, GrammarProcessor, LlmCorrectionConfig,
     LlmCorrectionProcessor, Pipeline, PunctuationProcessor, WordSubstitutionProcessor,
 };
+use crate::context_words::ContextWords;
 use crate::user_dictionary::UserDictionary;
 
 /// One post-processing step. The string names are the config vocabulary.
@@ -172,6 +173,9 @@ pub struct StageContext {
     pub user_dict: Option<Arc<UserDictionary>>,
     pub word_sub: Option<WordSubstitutionProcessor>,
     pub llm: Option<LlmCorrectionConfig>,
+    /// Words from the screen at recording start (context biasing). Empty when
+    /// collection is off; never persisted.
+    pub context_words: ContextWords,
 }
 
 /// Which pass a pipeline serves. Preview drops the slow final-only stages.
@@ -201,16 +205,23 @@ impl Pipeline {
                     None => debug!("pipeline: word_substitution listed but no rules loaded"),
                 },
                 Stage::FuzzyVocab => match &ctx.user_dict {
-                    Some(d) => pipeline
-                        .add_processor(Box::new(FuzzyVocabularyProcessor::new(Arc::clone(d)))),
+                    Some(d) => pipeline.add_processor(Box::new(
+                        FuzzyVocabularyProcessor::with_context(
+                            Arc::clone(d),
+                            ctx.context_words.glossary(),
+                        ),
+                    )),
                     None => debug!("pipeline: fuzzy_vocab listed but no user dictionary"),
                 },
-                Stage::Grammar => match &ctx.user_dict {
-                    Some(d) => pipeline.add_processor(Box::new(
-                        GrammarProcessor::new_with_user_dictionary(Arc::clone(d)),
-                    )),
-                    None => pipeline.add_processor(Box::new(GrammarProcessor::new())),
-                },
+                Stage::Grammar => {
+                    let grammar = match &ctx.user_dict {
+                        Some(d) => GrammarProcessor::new_with_user_dictionary(Arc::clone(d)),
+                        None => GrammarProcessor::new(),
+                    };
+                    pipeline.add_processor(Box::new(
+                        grammar.with_context_words(ctx.context_words.spelling_allowlist()),
+                    ))
+                }
                 Stage::LlmCorrection => match &ctx.llm {
                     Some(cfg) if cfg.is_configured() => pipeline.add_processor(Box::new(
                         LlmCorrectionProcessor::new(cfg.clone(), ctx.user_dict.clone()),
@@ -273,6 +284,24 @@ mod tests {
     fn unknown_names_are_skipped() {
         let got = resolve_stages(&[], Some("grammar,bogus"), StageSwitches::default());
         assert_eq!(got, vec![Stage::Grammar]);
+    }
+
+    #[test]
+    fn context_words_reach_fuzzy_vocab_without_extra_stages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("user_words.txt");
+        let dict = Arc::new(UserDictionary::with_paths(path.clone(), None).unwrap());
+        let words = crate::context_words::extract(&["fetch_user_data"], 10);
+        let ctx = StageContext {
+            user_dict: Some(Arc::clone(&dict)),
+            context_words: ContextWords::new(words),
+            ..StageContext::default()
+        };
+        let p = Pipeline::from_stages(&[Stage::FuzzyVocab], &ctx, PipelinePass::Final);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p.process("call fetch user data").unwrap(), "call fetch_user_data");
+        assert!(dict.app_words().is_empty());
+        assert!(!path.exists());
     }
 
     #[test]

@@ -231,6 +231,17 @@ To compare engines or stage lists on one recording, convert it to 16 kHz mono an
 voice-dictation transcribe-file clip.wav --model parakeet:default --stages none --paced
 ```
 
+### Context biasing
+
+When a recording starts, the daemon reads the focused window title, and the visible pane text when the target is wezterm. It keeps up to 40 distinctive words: identifiers such as `hotword_trie` and words outside the English dictionary such as `hyprctl`. Common words and terminal noise are dropped. For that one recording, the CTC Direct engine boosts these words in beam search at half the weight of `hotwords.txt` entries. The `fuzzy_vocab` stage also matches against them and restores their on-screen spelling, so "hotword trie" comes out as `hotword_trie`. Your dictionary wins when both have the same word.
+
+The words are kept in memory only. They are never added to the user dictionary or written anywhere. To stop reading on-screen context:
+
+```toml
+[daemon]
+enable_context_biasing = false
+```
+
 ### LLM correction
 
 The `llm_correction` stage sends the final text to a model on Amazon Bedrock. It applies spoken self-corrections such as "scratch that" and fixes glossary terms. Add it to a `[pipeline]` list and set the model:

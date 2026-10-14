@@ -29,8 +29,15 @@ use std::sync::Arc;
 ///
 /// The glossary is read fresh on every call, so `dict add` takes effect on the
 /// next utterance without a restart.
+///
+/// A session may extend the glossary with context words (see
+/// [`crate::context_words`]). They keep their on-screen spelling, lose to a
+/// user dictionary entry that normalizes the same, and are fuzzy-matched only
+/// on [`HIGH_SIMILARITY`] (no phonetic relaxation), since they were never
+/// vetted by the user.
 pub struct FuzzyVocabularyProcessor {
     dictionary: Arc<UserDictionary>,
+    context: Vec<String>,
 }
 
 /// Minimum normalized length for a term to be eligible for *fuzzy* (non-exact)
@@ -57,28 +64,43 @@ struct FuzzyEntry {
     canonical: String,
     normalized: String,
     phonetic: String,
+    /// Temporary context word: fuzzy-matched on spelling similarity only.
+    context: bool,
 }
 
 impl FuzzyVocabularyProcessor {
     pub fn new(dictionary: Arc<UserDictionary>) -> Self {
-        Self { dictionary }
+        Self::with_context(dictionary, Vec::new())
+    }
+
+    /// Like [`new`](Self::new), plus this session's context words. They are
+    /// held here only and never added to the dictionary.
+    pub fn with_context(dictionary: Arc<UserDictionary>, context: Vec<String>) -> Self {
+        Self { dictionary, context }
     }
 
     fn build_glossary(&self) -> Glossary {
         let mut exact = HashMap::new();
         let mut fuzzy = Vec::new();
-        for word in self.dictionary.app_words() {
+        let user = self.dictionary.app_words().into_iter().map(|w| (w, false));
+        let context = self.context.iter().cloned().map(|w| (w, true));
+        // User words go first so they win every collision below.
+        for (word, is_context) in user.chain(context) {
             let normalized = normalize(&word);
             if normalized.is_empty() {
                 continue;
             }
             // First writer wins if two canonical forms normalize identically.
+            if is_context && exact.contains_key(&normalized) {
+                continue;
+            }
             exact.entry(normalized.clone()).or_insert_with(|| word.clone());
             if normalized.chars().count() >= MIN_FUZZY_LEN {
                 fuzzy.push(FuzzyEntry {
                     canonical: word.clone(),
                     phonetic: phonetic_key(&normalized),
                     normalized,
+                    context: is_context,
                 });
             }
         }
@@ -261,8 +283,9 @@ fn best_fuzzy_match(norm: &str, entries: &[FuzzyEntry]) -> Option<String> {
             continue;
         }
         let sim = strsim::jaro_winkler(norm, &entry.normalized);
-        let accept =
-            sim >= HIGH_SIMILARITY || (token_phon == entry.phonetic && sim >= PHONETIC_SIMILARITY);
+        let phonetic_match =
+            !entry.context && token_phon == entry.phonetic && sim >= PHONETIC_SIMILARITY;
+        let accept = sim >= HIGH_SIMILARITY || phonetic_match;
         if accept && best.map(|(b, _)| sim > b).unwrap_or(true) {
             best = Some((sim, &entry.canonical));
         }
@@ -296,6 +319,51 @@ mod tests {
         assert_eq!(p.process("let's start a new scheme").unwrap(), "let's start a new scheme");
         // Genuine near-misses still correct.
         assert_eq!(p.process("open hyperland config").unwrap(), "open hyprland config");
+    }
+
+    fn processor_with_context(words: &[&str], context: &[&str]) -> FuzzyVocabularyProcessor {
+        let p = processor_with(words);
+        FuzzyVocabularyProcessor::with_context(
+            p.dictionary,
+            context.iter().map(|s| s.to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn context_word_restores_identifier_spelling() {
+        let p = processor_with_context(&[], &["hotword_trie", "WindowTarget"]);
+        assert_eq!(p.process("open hotword trie now").unwrap(), "open hotword_trie now");
+        assert_eq!(p.process("the window target.").unwrap(), "the WindowTarget.");
+    }
+
+    #[test]
+    fn context_word_fuzzy_needs_high_similarity() {
+        let p = processor_with_context(&[], &["hyprctl"]);
+        // Close spelling variant still snaps.
+        assert_eq!(p.process("run hyprctrl please").unwrap(), "run hyprctl please");
+        // "hiprctl" scores 0.91 with a matching phonetic key: enough for a
+        // user dictionary word, not for an unvetted context word.
+        let p = processor_with_context(&[], &["hyprctl"]);
+        assert_eq!(p.process("run hiprctl").unwrap(), "run hiprctl");
+        let p = processor_with(&["hyprctl"]);
+        assert_eq!(p.process("run hiprctl").unwrap(), "run hyprctl");
+    }
+
+    #[test]
+    fn user_dictionary_wins_over_context() {
+        let p = processor_with_context(&["hyprland"], &["Hyprland"]);
+        assert_eq!(p.process("open hyprland").unwrap(), "open hyprland");
+    }
+
+    #[test]
+    fn context_words_are_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("user_words.txt");
+        let dict = Arc::new(UserDictionary::with_paths(path.clone(), None).unwrap());
+        let p = FuzzyVocabularyProcessor::with_context(Arc::clone(&dict), vec!["kubectl".into()]);
+        assert_eq!(p.process("kubectl").unwrap(), "kubectl");
+        assert!(dict.app_words().is_empty());
+        assert!(!path.exists());
     }
 
     #[test]

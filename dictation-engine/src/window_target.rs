@@ -8,6 +8,7 @@ use tracing::debug;
 pub struct WindowTarget {
     address: String,
     class: String,
+    title: String,
 }
 
 impl WindowTarget {
@@ -28,9 +29,10 @@ impl WindowTarget {
 
         let address = value["address"].as_str()?.to_string();
         let class = value["class"].as_str()?.to_string();
+        let title = value["title"].as_str().unwrap_or_default().to_string();
 
         debug!("Captured window: class={}, address={}", class, address);
-        Some(Self { address, class })
+        Some(Self { address, class, title })
     }
 
     /// Refocus the captured window before typing.
@@ -52,5 +54,9 @@ impl WindowTarget {
 
     pub fn class(&self) -> &str {
         &self.class
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
     }
 }
