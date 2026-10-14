@@ -1271,22 +1271,6 @@ pub async fn run() -> Result<()> {
                             if let Some(ref wt) = window_target {
                                 info!("Captured window target: class={}", wt.class());
                             }
-                            let session_context =
-                                match (&window_target, config.daemon.enable_context_biasing) {
-                                    (Some(wt), true) => {
-                                        context_words::collect(wt.class(), wt.title())
-                                            .await
-                                            .extract(context_words::MAX_CONTEXT_WORDS)
-                                    }
-                                    _ => context_words::ContextWords::default(),
-                                };
-                            if !session_context.is_empty() {
-                                info!("Context biasing: {} words", session_context.len());
-                                debug!(
-                                    "Context words: {:?}",
-                                    session_context.iter().map(|w| &w.text).collect::<Vec<_>>()
-                                );
-                            }
                             media_was_playing = pause_media_if_playing();
 
                             _idle_inhibit =
@@ -1317,6 +1301,25 @@ pub async fn run() -> Result<()> {
 
                             // Mark audio as healthy at start
                             health_state.audio_healthy.store(true, Ordering::Relaxed);
+
+                            // Collect context after capture starts, so speech that
+                            // begins while the pane is read is buffered, not lost.
+                            let session_context =
+                                match (&window_target, config.daemon.enable_context_biasing) {
+                                    (Some(wt), true) => {
+                                        context_words::collect(wt.class(), wt.title())
+                                            .await
+                                            .extract(context_words::MAX_CONTEXT_WORDS)
+                                    }
+                                    _ => context_words::ContextWords::default(),
+                                };
+                            if !session_context.is_empty() {
+                                info!("Context biasing: {} words", session_context.len());
+                                debug!(
+                                    "Context words: {:?}",
+                                    session_context.iter().map(|w| &w.text).collect::<Vec<_>>()
+                                );
+                            }
 
                             // Recreate engine if it was released due to idle timeout
                             if preview_engine.is_none() {
