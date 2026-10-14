@@ -27,7 +27,7 @@ flowchart TD
         cap["PipeWire / ALSA capture"] --> vad["Silero VAD"]
         vad --> asr["Parakeet TDT — ONNX Runtime, fully local"]
         asr --> post["Post-processing: Harper grammar, user dictionary, hotword substitution"]
-        post --> inject["wtype injection into focused window"]
+        post --> inject["Text writer: input-method commit, clipboard paste, or wtype"]
     end
 
     engine -->|"live transcription over unix socket"| hud["Slint layer-shell overlay HUD"]
@@ -38,11 +38,11 @@ flowchart TD
 ## Requirements
 
 - Wayland compositor (Hyprland, Sway, etc.)
-- `wtype` — keyboard input injection
+- `wtype` — keyboard input injection (last-resort writer, and the paste keystroke)
 - PipeWire or ALSA audio
 - ~1.6 GB disk space for the Parakeet model
 
-Optional: `playerctl` for media pause/resume.
+Optional: `playerctl` for media pause/resume; `wl-clipboard` for the clipboard-paste writer.
 
 ## Installation
 
@@ -198,6 +198,16 @@ grammar_check = true
 ```
 
 Run `voice-dictation diagnose` to inspect the current configuration and model status.
+
+### Text writers
+
+The daemon tries three ways to put the final text into the focused window, in order:
+
+1. **Input method** (`zwp_input_method_v2`): one atomic `commit_string`, no clipboard involved. Works in GTK apps and in Chromium/Electron started with `--enable-wayland-ime`. Skipped when another input method (fcitx5, ibus) holds the slot, or when the focused window has no text-input-v3 field (XWayland apps, Electron without the flag).
+2. **Clipboard paste**: saves every type on the clipboard, copies the text, sends Ctrl+V (Ctrl+Shift+V in terminals), then puts the saved clipboard back after `paste_restore_delay_ms`. Needs `wl-clipboard`.
+3. **wtype**: types the text key by key.
+
+`text_writer = "paste"` or `"wtype"` in `[daemon]` starts the chain lower down. Your clipboard is no longer overwritten with each dictation; set `keep_result_in_clipboard = true` to keep the old behaviour. `voice-dictation diagnose` shows which writers are usable and which one the last dictation used.
 
 ### Engines
 

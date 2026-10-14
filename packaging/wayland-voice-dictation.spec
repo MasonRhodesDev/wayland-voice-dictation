@@ -56,6 +56,7 @@ Requires:       wtype
 Requires:       pipewire
 Requires:       onnxruntime
 Recommends:     playerctl
+Recommends:     wl-clipboard
 
 %description
 Offline voice dictation daemon for Hyprland (and other Wayland compositors)

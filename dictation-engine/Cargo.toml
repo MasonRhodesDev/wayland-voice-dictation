@@ -68,6 +68,8 @@ correction-engine = { path = "../correction-engine", optional = true }
 # zwp_input_method_v2 diagnostic probe (`voice-dictation debug ime-probe`)
 wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
+# zwlr_data_control_v1: restores multi-type clipboard snapshots after a paste
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 libc = "0.2"
 
 [dev-dependencies]

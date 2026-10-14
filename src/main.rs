@@ -338,6 +338,10 @@ fn check_runtime_dependencies(
         }
     }
 
+    if !check_command_available("wl-copy") || !check_command_available("wl-paste") {
+        warnings.push("wl-clipboard (wl-copy, wl-paste) - clipboard paste writer unavailable");
+    }
+
     if !check_command_available("pactl") && !check_command_available("pw-cli") {
         warnings.push("pactl or pw-cli - audio device enumeration may not work");
     }
@@ -1156,9 +1160,41 @@ fn diagnose() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Current recordings: {} (use 'voice-dictation debug list' to view)", count);
     }
 
+    show_text_writers();
+
     check_binary_consistency();
 
     Ok(())
+}
+
+fn show_text_writers() {
+    use dictation_engine::text_writer;
+
+    println!("\nText writers (tried in order, see text_writer in config):");
+    if std::env::var("WAYLAND_DISPLAY").is_err() {
+        println!("  (no WAYLAND_DISPLAY - run from your Wayland session to probe writers)");
+    } else {
+        for status in text_writer::probe_writers() {
+            println!("  {:<6} {}", status.writer, status.detail);
+        }
+    }
+
+    match text_writer::load_last_write() {
+        Ok(Some(last)) => {
+            println!(
+                "  Last dictation: {} ({} chars into {}, {})",
+                last.writer,
+                last.chars,
+                last.window_class.as_deref().unwrap_or("unknown window"),
+                last.local_time()
+            );
+            for f in &last.fell_through {
+                println!("    fell through {}: {}", f.writer, f.reason);
+            }
+        }
+        Ok(None) => println!("  Last dictation: none recorded since login"),
+        Err(e) => println!("  Last dictation: unreadable ({})", e),
+    }
 }
 
 fn download_model() -> Result<(), Box<dyn std::error::Error>> {
