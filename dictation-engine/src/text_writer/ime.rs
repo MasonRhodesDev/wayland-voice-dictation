@@ -198,6 +198,7 @@ fn session(commit_text: Option<&str>, timeout: Duration) -> Result<SessionEnd, W
 /// no input-method manager, another IME owns the slot, or no text input
 /// activated within `activate_timeout`).
 pub fn commit(text: &str, activate_timeout: Duration) -> Result<(), WriteError> {
+    check_length(text)?;
     match session(Some(text), activate_timeout)? {
         SessionEnd::Committed => Ok(()),
         SessionEnd::Unavailable => Err(unavailable(
@@ -209,6 +210,23 @@ pub fn commit(text: &str, activate_timeout: Duration) -> Result<(), WriteError> 
             activate_timeout.as_millis()
         ))),
     }
+}
+
+/// Conservative ceiling for one `commit_string`. A Wayland message has
+/// historically been capped at 4096 bytes, and the compositor forwards the
+/// string to the client as one `zwp_text_input_v3.commit_string`; longer
+/// dictations go to the paste writer instead. Raise once the real limit is
+/// confirmed live.
+const MAX_COMMIT_BYTES: usize = 3500;
+
+fn check_length(text: &str) -> Result<(), WriteError> {
+    if text.len() > MAX_COMMIT_BYTES {
+        return Err(unavailable(format!(
+            "text too long for one commit_string ({} bytes > {MAX_COMMIT_BYTES})",
+            text.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Input-method slot state, for `diagnose`.
@@ -290,6 +308,13 @@ mod tests {
         let t = feed(&[Signal::Activate, Signal::Done, Signal::Unavailable]);
         assert!(t.unavailable);
         assert_eq!(t.ready(), None);
+    }
+
+    #[test]
+    fn long_text_falls_through_before_binding() {
+        assert!(check_length(&"a".repeat(MAX_COMMIT_BYTES)).is_ok());
+        let err = check_length(&"a".repeat(MAX_COMMIT_BYTES + 1)).unwrap_err();
+        assert!(matches!(err, WriteError::Unavailable(ref m) if m.contains("too long")));
     }
 
     #[test]
