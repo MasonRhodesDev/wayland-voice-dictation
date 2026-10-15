@@ -10,8 +10,12 @@
 //! - a tight timeout, and any transport or HTTP error;
 //! - a reply that is empty, wrapped in the prompt's tags, or longer than the
 //!   input by more than formatting can explain;
-//! - a reply whose case-insensitive character edit distance from the input
-//!   exceeds `max_edit_percent` of the input length (a rewrite, not a cleanup);
+//! - a reply containing any word that is not in the input (the pass may only
+//!   delete words and change punctuation and casing);
+//! - a reply that deletes more than `max_dropped_words` words beyond fillers
+//!   ("um", "like", "you know", ...), repeated words, and words the reply
+//!   still uses elsewhere (false starts), which catches dropped
+//!   clauses such as "I think" that a character-distance check lets through;
 //! - a reply that drops or alters any user-dictionary term found in the input.
 
 use std::sync::Arc;
@@ -36,9 +40,10 @@ pub struct LlmFormatConfig {
     /// How long to wait for the model before typing the rule-pipeline text.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    /// Largest accepted edit distance, as a percentage of the input length.
-    #[serde(default = "default_max_edit_percent")]
-    pub max_edit_percent: u32,
+    /// How many non-filler words a reply may delete (one false-start word by
+    /// default). Fillers and repeated words never count.
+    #[serde(default = "default_max_dropped_words")]
+    pub max_dropped_words: usize,
     /// Comma-separated app categories the stage skips.
     #[serde(default = "default_skip_categories")]
     pub skip_categories: String,
@@ -47,8 +52,8 @@ pub struct LlmFormatConfig {
 fn default_timeout_ms() -> u64 {
     1500
 }
-fn default_max_edit_percent() -> u32 {
-    40
+fn default_max_dropped_words() -> usize {
+    1
 }
 fn default_skip_categories() -> String {
     "terminal".to_string()
@@ -59,7 +64,7 @@ impl Default for LlmFormatConfig {
         Self {
             enabled: false,
             timeout_ms: default_timeout_ms(),
-            max_edit_percent: default_max_edit_percent(),
+            max_dropped_words: default_max_dropped_words(),
             skip_categories: default_skip_categories(),
         }
     }
@@ -83,8 +88,10 @@ Edits you may make:\n\
 when used as fillers.\n\
 - Remove false starts, stutters, and accidentally repeated words.\n\
 - Fix punctuation and capitalization.\n\
-Keep everything else exactly: the speaker's wording, word order, tone, and profanity. Never \
-summarize, answer, explain, translate, or add words. Glossary terms must appear exactly as \
+Keep everything else exactly: the speaker's wording, word order, tone, and profanity. Do not \
+remove hedges or opinions such as \"I think\", \"I guess\" or \"I was thinking\"; remove only \
+the fillers listed above. Do not change, correct, or replace any word. Never summarize, answer, \
+explain, translate, or add words. Glossary terms must appear exactly as \
 written, with the same spelling and capitalization. Reply with only the edited passage, without \
 tags or quotes.";
 
@@ -148,12 +155,8 @@ impl TextProcessor for LlmFormatProcessor {
             timeout: Duration::from_millis(self.config.timeout_ms.max(100)),
         };
         match self.client.chat(&req) {
-            Ok(reply) => match accept_format(
-                text,
-                &reply,
-                &present,
-                self.config.max_edit_percent as f64 / 100.0,
-            ) {
+            Ok(reply) => match accept_format(text, &reply, &present, self.config.max_dropped_words)
+            {
                 Ok(out) => {
                     info!("llm_format: {} ms", started.elapsed().as_millis());
                     Ok(out)
@@ -201,7 +204,7 @@ fn accept_format(
     input: &str,
     reply: &str,
     terms: &[&str],
-    max_edit_ratio: f64,
+    max_dropped_words: usize,
 ) -> std::result::Result<String, String> {
     let reply = reply.trim();
     if reply.is_empty() {
@@ -216,11 +219,30 @@ fn accept_format(
     if out > inp + inp / 5 + 10 {
         return Err(format!("length {out} vs input {inp}"));
     }
-    let distance = strsim::levenshtein(&input.trim().to_lowercase(), &reply.to_lowercase());
-    // Small slack so very short inputs ("um yes" to "Yes.") are not rejected.
-    let allowed = max_edit_ratio.max(0.0) * inp as f64 + 3.0;
-    if distance as f64 > allowed {
-        return Err(format!("edit distance {distance} exceeds {allowed:.0}"));
+    let (in_words, out_words) = (words(input), words(reply));
+    let mut remaining = counts(&in_words);
+    for w in &out_words {
+        match remaining.get_mut(w.as_str()) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => return Err(format!("added word '{w}'")),
+        }
+    }
+    // Whatever is left was deleted. Fillers, repeats, and words the reply
+    // still uses elsewhere (the restated subject of a false start, "we should,
+    // we need to") may go freely.
+    let mut deletable = filler_allowance(&in_words);
+    let dropped: Vec<&str> = remaining
+        .iter()
+        .filter(|(w, _)| !out_words.iter().any(|o| o == *w))
+        .flat_map(|(w, n)| {
+            let free = deletable.remove(w).unwrap_or(0);
+            std::iter::repeat_n(*w, n.saturating_sub(free))
+        })
+        .collect();
+    if dropped.len() > max_dropped_words {
+        let mut dropped = dropped;
+        dropped.sort_unstable();
+        return Err(format!("dropped words {dropped:?}"));
     }
     for term in terms {
         if count_exact(reply, term) < count_exact(input, term) {
@@ -228,6 +250,47 @@ fn accept_format(
         }
     }
     Ok(reply.to_string())
+}
+
+/// Single words the pass may delete without counting against
+/// `max_dropped_words`.
+const FILLERS: &[&str] =
+    &["um", "umm", "uh", "uhm", "er", "erm", "ah", "hmm", "mm", "like", "so", "okay", "ok"];
+
+/// Two-word fillers; both words may be deleted where they appear together.
+const FILLER_PAIRS: &[(&str, &str)] = &[("you", "know"), ("i", "mean")];
+
+/// Lowercased words: runs of letters, digits and inner apostrophes.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '\u{2019}'))
+        .map(|w| w.trim_matches(|c| c == '\'' || c == '\u{2019}').to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+fn counts(words: &[String]) -> std::collections::HashMap<&str, usize> {
+    let mut m = std::collections::HashMap::new();
+    for w in words {
+        *m.entry(w.as_str()).or_insert(0) += 1;
+    }
+    m
+}
+
+/// How many of each input word may be deleted for free: fillers, filler
+/// pairs, and the extra copies of a word repeated back to back ("the the").
+fn filler_allowance(words: &[String]) -> std::collections::HashMap<&str, usize> {
+    let mut m = std::collections::HashMap::new();
+    for (i, w) in words.iter().enumerate() {
+        let prev = i.checked_sub(1).map(|j| words[j].as_str());
+        let next = words.get(i + 1).map(String::as_str);
+        let in_pair = FILLER_PAIRS
+            .iter()
+            .any(|(a, b)| (w == a && next == Some(*b)) || (w == b && prev == Some(*a)));
+        if FILLERS.contains(&w.as_str()) || in_pair || prev == Some(w.as_str()) {
+            *m.entry(w.as_str()).or_insert(0) += 1;
+        }
+    }
+    m
 }
 
 /// Whole-word occurrences of `term` in `text`, matched case-insensitively,
@@ -400,7 +463,7 @@ mod tests {
 
     #[test]
     fn guardrails() {
-        let ok = |i: &str, r: &str| accept_format(i, r, &[], 0.4);
+        let ok = |i: &str, r: &str| accept_format(i, r, &[], 1);
         assert_eq!(ok("um yes", "Yes.").unwrap(), "Yes.");
         assert!(ok("hello", "").is_err());
         assert!(ok("hello", "   ").is_err());
@@ -409,6 +472,64 @@ mod tests {
         assert_eq!(ok("i think so", " I think so. ").unwrap(), "I think so.");
         let filler = "so um I was uh thinking that uh we could um maybe like go";
         assert!(ok(filler, "So I was thinking that we could maybe go.").is_ok());
+        assert!(ok("we need the the slides", "We need the slides.").is_ok());
+        assert!(ok("it is, you know, fine", "It is fine.").is_ok());
+        // One false-start word may go; a clause may not.
+        assert!(ok("we should we need to ship", "We need to ship.").is_ok());
+        assert!(ok("we should we must we need to ship", "We need to ship.").is_err());
+        // No new words, not even a fix.
+        assert!(ok("can your check it", "Can you check it?").is_err());
+        assert!(ok("I mean the job", "I meant the job.").is_err());
+    }
+
+    /// Rule-pipeline text and Qwen2.5-3B-Instruct replies from the live check
+    /// on PR #33 (Piper TTS clips through Parakeet). The model removed fillers
+    /// but also dropped hedges and changed words; those replies must fall back.
+    #[test]
+    fn live_check_replies() {
+        let cases = [
+            // Dropped "I think".
+            (
+                "Um, so I think we should deploy the new build to staging tomorrow.",
+                "We should deploy the new build to staging tomorrow.",
+                false,
+            ),
+            // Added "you" and "meant".
+            (
+                "Hey, can your check whether the Nova job is healthy? I mean the llm job.",
+                "Can you check whether the Nova job is healthy? I meant the llm job.",
+                false,
+            ),
+            // Added "sf".
+            (
+                "Ah, the Skia St endpoint is returning a 404., can you look at it?",
+                "The Skia Sf endpoint is returning a 404. Can you look at it?",
+                false,
+            ),
+            // Dropped "I was thinking that".
+            (
+                "So like, I was thinking that we could, you know, move the pipewire config into the repo.",
+                "So we could move the pipewire config into the repo.",
+                false,
+            ),
+            (
+                "Um, kubectl is broken on my machine again.",
+                "kubectl is broken on my machine again.",
+                true,
+            ),
+            (
+                "Okay so,, the meeting is at three and we need the slides by two.",
+                "The meeting is at three and we need the slides by two.",
+                true,
+            ),
+        ];
+        let terms = ["llm", "pipewire", "kubectl"];
+        for (input, reply, accepted) in cases {
+            let present: Vec<&str> =
+                terms.iter().copied().filter(|t| count_exact(input, t) > 0).collect();
+            let got = accept_format(input, reply, &present, 1);
+            assert_eq!(got.is_ok(), accepted, "{input:?} -> {reply:?}: {got:?}");
+        }
     }
 
     #[test]
@@ -424,9 +545,9 @@ mod tests {
     #[test]
     fn dictionary_term_must_survive_verbatim() {
         let terms = ["JWKS"];
-        assert!(accept_format("use JWKS and JWKS", "Use JWKS and jwks.", &terms, 0.4).is_err());
-        assert!(accept_format("use JWKS", "Use JWKS.", &terms, 0.4).is_ok());
+        assert!(accept_format("use JWKS and JWKS", "Use JWKS and jwks.", &terms, 1).is_err());
+        assert!(accept_format("use JWKS", "Use JWKS.", &terms, 1).is_ok());
         let lower = ["kubectl"];
-        assert!(accept_format("kubectl is broken", "Kubectl is broken.", &lower, 0.4).is_err());
+        assert!(accept_format("kubectl is broken", "Kubectl is broken.", &lower, 1).is_err());
     }
 }

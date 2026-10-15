@@ -427,7 +427,7 @@
     {
       "id": "llm_format",
       "title": "LLM Formatting",
-      "description": "Optional pass after the rule stages and before typing: the local LLM removes fillers and false starts and fixes punctuation and casing in the focused app's style. Needs Local LLM Backend. On timeout, error, or a reply that rewrites too much or alters a dictionary word, the rule-pipeline text is typed instead.",
+      "description": "Optional pass after the rule stages and before typing: the local LLM removes fillers and false starts and fixes punctuation and casing in the focused app's style. Needs Local LLM Backend. On timeout, error, or a reply that adds words, drops more than fillers, or alters a dictionary word, the rule-pipeline text is typed instead.",
       "fields": [
         {
           "id": "enabled",
@@ -448,13 +448,13 @@
           "ui_widget": "number_input"
         },
         {
-          "id": "max_edit_percent",
-          "label": "Max Edit",
-          "description": "Largest accepted change, as a percentage of the text's length. Replies that change more are discarded as rewrites.",
+          "id": "max_dropped_words",
+          "label": "Max Dropped Words",
+          "description": "How many words besides fillers (um, like, you know) and repeats a reply may delete. Replies that add any word or drop more are discarded.",
           "type": "number",
-          "default": 40,
-          "min": 5,
-          "max": 100,
+          "default": 1,
+          "min": 0,
+          "max": 10,
           "ui_widget": "number_input"
         },
         {

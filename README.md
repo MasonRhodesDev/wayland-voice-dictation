@@ -278,11 +278,11 @@ model = "qwen2.5-3b-instruct"
 [llm_format]
 enabled = true
 timeout_ms = 1500                  # then type the unformatted text
-max_edit_percent = 40              # discard replies that change more than this
+max_dropped_words = 1              # non-filler words a reply may delete
 skip_categories = "terminal"       # never reformat shell commands
 ```
 
-The stage keeps the rule-pipeline text and logs a warning when the server is unreachable, errors or times out, and when a reply is empty, much longer than the input, changes more than `max_edit_percent` of it, or alters a user-dictionary word. Dictionary words are sent as a glossary and must come back exactly as they were. With the stage disabled or the server down, output is the same as without it.
+The stage keeps the rule-pipeline text and logs a warning when the server is unreachable, errors or times out, and when a reply is empty, adds any word, deletes more than `max_dropped_words` words besides fillers and repeats, or alters a user-dictionary word. The pass can only delete words and change punctuation and casing. Dictionary words are sent as a glossary and must come back exactly as they were. With the stage disabled or the server down, output is the same as without it.
 
 ## Troubleshooting
 

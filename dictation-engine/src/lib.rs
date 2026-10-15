@@ -2005,6 +2005,15 @@ pub async fn transcribe_file(
     stages_override: Option<&str>,
     paced: bool,
 ) -> Result<FileTranscription> {
+    // Show stage warnings (such as an llm_format fallback) on stderr; the
+    // daemon's logger is not set up for this command.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     let config = load_config()?;
     let mut reader = hound::WavReader::open(wav)
         .map_err(|e| anyhow::anyhow!("opening {}: {e}", wav.display()))?;
@@ -2155,7 +2164,7 @@ mod config_tests {
             [llm_format]
             enabled = false
             timeout_ms = 1500
-            max_edit_percent = 40
+            max_dropped_words = 1
             skip_categories = "terminal"
             "#,
         )
@@ -2204,7 +2213,7 @@ mod config_tests {
         let code = LlmFormatConfig::default();
         assert_eq!(fmt.enabled, code.enabled);
         assert_eq!(fmt.timeout_ms, code.timeout_ms);
-        assert_eq!(fmt.max_edit_percent, code.max_edit_percent);
+        assert_eq!(fmt.max_dropped_words, code.max_dropped_words);
         assert_eq!(fmt.skip_categories, code.skip_categories);
         let backend: LlmBackendConfig = section("llm_backend").try_into().unwrap();
         assert!(!backend.is_configured());
