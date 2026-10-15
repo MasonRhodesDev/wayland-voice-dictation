@@ -207,6 +207,8 @@ The daemon tries three ways to put the final text into the focused window, in or
 2. **Clipboard paste**: saves every type on the clipboard, copies the text, sends Ctrl+V (Ctrl+Shift+V in terminals), then puts the saved clipboard back after `paste_restore_delay_ms`. Needs `wl-clipboard`.
 3. **wtype**: types the text key by key.
 
+Terminals (kitty, foot, wezterm, ...) skip the first two and are typed into word by word with wtype, because terminal UIs such as Claude Code drop or garble fast input. Set `ime_in_terminals = true` to give them the full chain.
+
 `text_writer = "paste"` or `"wtype"` in `[daemon]` starts the chain lower down. Your clipboard is no longer overwritten with each dictation; set `keep_result_in_clipboard = true` to keep the old behaviour. `voice-dictation diagnose` shows which writers are usable and which one the last dictation used.
 
 ### Engines

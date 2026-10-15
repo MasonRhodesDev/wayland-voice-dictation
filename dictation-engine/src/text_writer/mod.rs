@@ -77,6 +77,21 @@ pub fn chain_for(preferred: &str) -> &'static [WriterKind] {
     }
 }
 
+/// Writer chain for one injection. Terminals get wtype with its per-word
+/// delay, the pre-chain behaviour: the IME and paste writers deliver the
+/// whole dictation at once, which TUIs like Claude Code's Ink UI drop or
+/// garble. `ime_in_terminals` opts terminals into the configured chain.
+pub fn chain_for_target(
+    preferred: &str,
+    category: AppCategory,
+    ime_in_terminals: bool,
+) -> &'static [WriterKind] {
+    if category == AppCategory::Terminal && !ime_in_terminals {
+        return &DEFAULT_CHAIN[2..];
+    }
+    chain_for(preferred)
+}
+
 /// Why a writer attempt did not succeed.
 #[derive(Debug)]
 pub enum WriteError {
@@ -449,6 +464,20 @@ mod tests {
         assert_eq!(chain_for(" Paste "), &[WriterKind::Paste, WriterKind::Wtype]);
         assert_eq!(chain_for("wtype"), &[WriterKind::Wtype]);
         assert_eq!(chain_for("bogus"), &DEFAULT_CHAIN);
+    }
+
+    #[test]
+    fn terminals_use_wtype_unless_opted_in() {
+        let wtype_only: &[WriterKind] = &[WriterKind::Wtype];
+        assert_eq!(chain_for_target("ime", AppCategory::Terminal, false), wtype_only);
+        assert_eq!(chain_for_target("paste", AppCategory::Terminal, false), wtype_only);
+        assert_eq!(chain_for_target("ime", AppCategory::Terminal, true), &DEFAULT_CHAIN);
+        assert_eq!(
+            chain_for_target("paste", AppCategory::Terminal, true),
+            &[WriterKind::Paste, WriterKind::Wtype]
+        );
+        assert_eq!(chain_for_target("ime", AppCategory::General, false), &DEFAULT_CHAIN);
+        assert_eq!(chain_for_target("ime", AppCategory::Browser, false), &DEFAULT_CHAIN);
     }
 
     #[test]

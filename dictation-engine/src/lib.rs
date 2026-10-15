@@ -228,6 +228,11 @@ struct DaemonConfig {
     #[serde(default)]
     keep_result_in_clipboard: bool,
 
+    // Let terminals use the IME/paste writers too. Off: terminals keep wtype with
+    // the per-word delay, since TUIs (Claude Code's Ink UI) garble bulk input.
+    #[serde(default)]
+    ime_in_terminals: bool,
+
     // Delay after the paste keystroke before the clipboard snapshot is restored (ms)
     #[serde(default = "default_paste_restore_delay_ms")]
     paste_restore_delay_ms: u64,
@@ -838,6 +843,7 @@ pub async fn run() -> Result<()> {
                 correction_backend_wezterm: default_correction_backend_wezterm(),
                 text_writer: default_text_writer(),
                 keep_result_in_clipboard: false,
+                ime_in_terminals: false,
                 paste_restore_delay_ms: default_paste_restore_delay_ms(),
             },
             pipeline: PipelineConfig::default(),
@@ -1830,7 +1836,11 @@ pub async fn run() -> Result<()> {
                     let typing_tx = gui_control_tx.clone();
                     let mut last_sent = 0usize;
                     text_writer::write(
-                        text_writer::chain_for(&config.daemon.text_writer),
+                        text_writer::chain_for_target(
+                            &config.daemon.text_writer,
+                            profile.category,
+                            config.daemon.ime_in_terminals,
+                        ),
                         &write_request,
                         &keyboard,
                         move |done, total| {
@@ -2052,6 +2062,7 @@ mod config_tests {
         .unwrap();
         assert_eq!(cfg.daemon.text_writer, "ime");
         assert!(!cfg.daemon.keep_result_in_clipboard);
+        assert!(!cfg.daemon.ime_in_terminals);
         assert_eq!(cfg.daemon.paste_restore_delay_ms, 500);
         assert_eq!(text_writer::chain_for(&cfg.daemon.text_writer), &text_writer::DEFAULT_CHAIN);
     }

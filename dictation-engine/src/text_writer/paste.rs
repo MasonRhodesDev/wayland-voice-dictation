@@ -78,7 +78,10 @@ async fn take_snapshot<C: Clipboard>(c: &mut C) -> Result<Snapshot> {
     for &mime in &wanted {
         match c.read(mime).await {
             Ok(bytes) => snapshot.push((mime.to_string(), bytes)),
-            Err(e) => debug!("clipboard snapshot: skipping {}: {}", mime, e),
+            Err(e) => warn!(
+                "Clipboard snapshot: {} could not be read and won't be restored: {:#}",
+                mime, e
+            ),
         }
     }
     if snapshot.is_empty() && !wanted.is_empty() {
@@ -129,7 +132,14 @@ pub(super) async fn paste<C: Clipboard>(
         None
     };
 
-    c.set(Some(TEXT_MIME), text.as_bytes()).await.map_err(|e| unavailable("wl-copy failed", e))?;
+    if let Err(e) = c.set(Some(TEXT_MIME), text.as_bytes()).await {
+        // wl-copy may have taken the selection before failing (or timing
+        // out): put the user's clipboard back before falling through.
+        if let Some(snapshot) = snapshot {
+            let _ = put_back(c, snapshot).await;
+        }
+        return Err(unavailable("wl-copy failed", e));
+    }
 
     if !wait_for_selection(c, text).await {
         if let Some(snapshot) = snapshot {
@@ -184,8 +194,15 @@ pub(super) async fn wl_copy(mime: Option<&str>, data: &[u8]) -> Result<()> {
     stdin.write_all(data).await?;
     drop(stdin);
     // wl-copy forks to serve the selection; the parent exits once it is set up.
-    let status =
-        tokio::time::timeout(READ_TIMEOUT, child.wait()).await.context("wl-copy timed out")??;
+    // A wedged one is killed and reaped so it cannot take the selection later,
+    // after the chain has moved on.
+    let status = match tokio::time::timeout(READ_TIMEOUT, child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = child.kill().await;
+            anyhow::bail!("wl-copy timed out (killed)");
+        }
+    };
     anyhow::ensure!(status.success(), "wl-copy exited with {status}");
     Ok(())
 }
@@ -299,6 +316,8 @@ mod tests {
         contents: Snapshot,
         log: Vec<String>,
         fail_paste: bool,
+        /// wl-copy takes the selection, then reports failure (timeout).
+        fail_set_after_taking: bool,
         set_is_ignored: bool,
         steal_after_paste: Option<Snapshot>,
         restored: Option<Snapshot>,
@@ -321,6 +340,9 @@ mod tests {
             self.log.push(format!("set {}", mime.unwrap_or("-")));
             if !self.set_is_ignored {
                 self.contents = vec![(mime.unwrap_or(TEXT_MIME).to_string(), data.to_vec())];
+            }
+            if self.fail_set_after_taking {
+                anyhow::bail!("wl-copy timed out (killed)");
             }
             Ok(())
         }
@@ -410,6 +432,20 @@ mod tests {
             FakeClipboard { contents: original.clone(), fail_paste: true, ..Default::default() };
         let err = paste(&mut c, "dictated", false, true, DELAY).await.unwrap_err();
         assert!(matches!(err, WriteError::Unavailable(ref m) if m.contains("paste keystroke")));
+        assert_eq!(c.contents, original);
+    }
+
+    #[tokio::test]
+    async fn wl_copy_failure_restores_and_falls_through() {
+        let original = snap(&[("text/html", "<b>old</b>"), (TEXT_MIME, "old")]);
+        let mut c = FakeClipboard {
+            contents: original.clone(),
+            fail_set_after_taking: true,
+            ..Default::default()
+        };
+        let err = paste(&mut c, "dictated", false, true, DELAY).await.unwrap_err();
+        assert!(matches!(err, WriteError::Unavailable(ref m) if m.contains("wl-copy failed")));
+        assert!(!c.log.iter().any(|l| l.starts_with("paste")));
         assert_eq!(c.contents, original);
     }
 
