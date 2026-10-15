@@ -58,6 +58,8 @@ struct Glossary {
     exact: HashMap<String, String>,
     /// Entries eligible for single-token fuzzy matching (normalized len >= MIN).
     fuzzy: Vec<FuzzyEntry>,
+    /// Whether any fuzzy entry is a context word.
+    has_context: bool,
 }
 
 struct FuzzyEntry {
@@ -104,7 +106,15 @@ impl FuzzyVocabularyProcessor {
                 });
             }
         }
-        Glossary { exact, fuzzy }
+        let has_context = fuzzy.iter().any(|e| e.context);
+        Glossary { exact, fuzzy, has_context }
+    }
+
+    /// Whether the spoken token is already a valid word, which a context
+    /// entry must never replace: correct speech would otherwise be rewritten
+    /// into an on-screen variant ("received" into a visible "recieved").
+    fn is_known_word(&self, core: &str) -> bool {
+        crate::context_words::is_english_word(core) || self.dictionary.contains(core)
     }
 }
 
@@ -154,7 +164,8 @@ impl TextProcessor for FuzzyVocabularyProcessor {
             // 2. Guarded single-token fuzzy match.
             let token = &tokens[i];
             let norm = normalize(&token.core);
-            if let Some(canonical) = best_fuzzy_match(&norm, &glossary.fuzzy) {
+            let allow_context = glossary.has_context && !self.is_known_word(&token.core);
+            if let Some(canonical) = best_fuzzy_match(&norm, &glossary.fuzzy, allow_context) {
                 out.push(format!("{}{}{}", token.prefix, canonical, token.suffix));
             } else {
                 out.push(token.original.clone());
@@ -268,8 +279,9 @@ fn similar_length(a: &str, b: &str) -> bool {
 
 /// Best glossary canonical for a normalized token, or `None` if nothing clears
 /// the confidence bar. Exact matches are handled earlier, so a token equal to a
-/// glossary term returns `None` here (no change needed).
-fn best_fuzzy_match(norm: &str, entries: &[FuzzyEntry]) -> Option<String> {
+/// glossary term returns `None` here (no change needed). Context entries are
+/// considered only when `allow_context` (the token is not a valid word).
+fn best_fuzzy_match(norm: &str, entries: &[FuzzyEntry], allow_context: bool) -> Option<String> {
     if norm.chars().count() < MIN_FUZZY_LEN {
         return None;
     }
@@ -278,6 +290,9 @@ fn best_fuzzy_match(norm: &str, entries: &[FuzzyEntry]) -> Option<String> {
     for entry in entries {
         if entry.normalized == norm {
             return None; // exact — leave it (already correct)
+        }
+        if entry.context && !allow_context {
+            continue;
         }
         if !similar_length(norm, &entry.normalized) {
             continue;
@@ -347,6 +362,17 @@ mod tests {
         assert_eq!(p.process("run hiprctl").unwrap(), "run hiprctl");
         let p = processor_with(&["hyprctl"]);
         assert_eq!(p.process("run hiprctl").unwrap(), "run hyprctl");
+    }
+
+    #[test]
+    fn context_never_rewrites_a_valid_word() {
+        // An on-screen typo or variant must not replace correct speech.
+        let p = processor_with_context(&[], &["recieved", "Jonathon"]);
+        assert_eq!(p.process("i received it").unwrap(), "i received it");
+        assert_eq!(p.process("ask jonathan").unwrap(), "ask jonathan");
+        // User dictionary words are valid too.
+        let p = processor_with_context(&["hyprlands"], &["hyprland"]);
+        assert_eq!(p.process("hyprlands").unwrap(), "hyprlands");
     }
 
     #[test]

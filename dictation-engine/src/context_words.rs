@@ -125,14 +125,14 @@ impl ContextWords {
         self.words.iter().map(|w| w.text.clone()).collect()
     }
 
-    /// Lowercased words and their spoken parts, for skipping spelling lints.
+    /// Lowercased words and their rare parts, for skipping spelling lints.
+    /// Only parts that passed the rarity filter are listed, so an on-screen
+    /// typo never shields the same typo in the transcript.
     pub fn spelling_allowlist(&self) -> HashSet<String> {
         let mut out = HashSet::new();
         for w in self.words.iter() {
             out.insert(w.text.to_lowercase());
-            for part in w.spoken.split(' ') {
-                out.insert(part.to_string());
-            }
+            out.extend(w.spoken.split(' ').filter(|p| is_rare(p)).map(str::to_string));
         }
         out
     }
@@ -295,7 +295,8 @@ fn split_identifier(token: &str) -> Vec<String> {
 }
 
 /// A part is rare when it is a real word (3+ letters) that the curated English
-/// dictionary does not know.
+/// dictionary does not know and that is not one edit from a word it does know
+/// (a typo or variant such as "recieve").
 fn is_rare(part: &str) -> bool {
     if part.chars().count() < MIN_LEN || !part.chars().all(char::is_alphabetic) {
         return false;
@@ -303,7 +304,59 @@ fn is_rare(part: &str) -> bool {
     if STOPWORDS.contains(&part) {
         return false;
     }
-    !english().contains_word_str(part)
+    !english().contains_word_str(part) && !near_english_word(part)
+}
+
+/// Whether `word` is a correctly spelled English word. A context word must
+/// never replace one (see [`crate::post_processing::FuzzyVocabularyProcessor`]).
+pub fn is_english_word(word: &str) -> bool {
+    english().contains_word_str(word)
+}
+
+/// Whether `word` is one edit (delete, insert, substitute, transpose) away
+/// from an English word: on screen that is a typo ("recieve") or a variant,
+/// not a distinctive term, and snapping speech onto it would make things worse.
+fn near_english_word(word: &str) -> bool {
+    const ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz";
+    let chars: Vec<char> = word.chars().collect();
+    let dict = english();
+    let hit = |cand: &[char]| {
+        let cand: String = cand.iter().collect();
+        cand.chars().count() >= MIN_LEN && dict.contains_word_str(&cand)
+    };
+    for i in 0..chars.len() {
+        let mut del = chars.clone();
+        del.remove(i);
+        if hit(&del) {
+            return true;
+        }
+        if i + 1 < chars.len() {
+            let mut swap = chars.clone();
+            swap.swap(i, i + 1);
+            if swap != chars && hit(&swap) {
+                return true;
+            }
+        }
+        for c in ALPHABET.chars() {
+            if c != chars[i] {
+                let mut sub = chars.clone();
+                sub[i] = c;
+                if hit(&sub) {
+                    return true;
+                }
+            }
+        }
+    }
+    for i in 0..=chars.len() {
+        for c in ALPHABET.chars() {
+            let mut ins = chars.clone();
+            ins.insert(i, c);
+            if hit(&ins) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn english() -> &'static Arc<MutableDictionary> {
@@ -429,11 +482,29 @@ mod tests {
     }
 
     #[test]
+    fn typos_and_variants_of_english_words_are_dropped() {
+        let got = extract(&["recieve the seperate definately teh hyprctl"], 10);
+        assert_eq!(texts(&got), vec!["hyprctl"]);
+        // A typo inside an identifier does not make it rare.
+        let got = extract(&["recieve_data"], 10);
+        assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[test]
+    fn spelling_allowlist_skips_common_parts() {
+        let words = ContextWords::new(extract(&["fetch_user_data"], 10));
+        let allow = words.spelling_allowlist();
+        assert!(allow.contains("fetch_user_data"));
+        assert!(!allow.contains("fetch"));
+    }
+
+    #[test]
     fn spelling_allowlist_includes_parts() {
         let words = ContextWords::new(extract(&["hotword_trie"], 10));
         let allow = words.spelling_allowlist();
         assert!(allow.contains("hotword_trie"));
         assert!(allow.contains("hotword"));
-        assert!(allow.contains("trie"));
+        // "trie" is an English word: Harper never flags it, so it is not listed.
+        assert!(!allow.contains("trie"));
     }
 }
