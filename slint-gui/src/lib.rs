@@ -308,6 +308,11 @@ fn spawn_channel_listener(
                                 state.fade = 1.0;
                                 state.typing_progress = 0.0;
                             }
+                            GuiControl::SetFormatting => {
+                                state.gui_state = GuiState::Formatting;
+                                state.fade = 1.0;
+                                state.typing_progress = 0.0;
+                            }
                             GuiControl::SetTyping { done, total } => {
                                 state.gui_state = GuiState::Typing;
                                 state.fade = 1.0;
@@ -370,7 +375,10 @@ fn spawn_channel_listener(
 }
 
 fn state_has_visible_animation(state: GuiState) -> bool {
-    matches!(state, GuiState::Transcribing | GuiState::Typing | GuiState::Closing)
+    matches!(
+        state,
+        GuiState::Transcribing | GuiState::Formatting | GuiState::Typing | GuiState::Closing
+    )
 }
 
 /// Run the presentation clock off the UI thread. It sleeps indefinitely while
@@ -449,14 +457,23 @@ fn compute_spectrum_bands(samples: &[f32]) -> Vec<f32> {
     bands
 }
 
+/// Optional label the UI shows beside the processing spinner.
+fn status_label(state: GuiState) -> &'static str {
+    match state {
+        GuiState::Formatting => "Formatting...",
+        _ => "",
+    }
+}
+
 /// Convert GuiState to mode integer for Slint
 fn state_to_mode(state: GuiState) -> i32 {
     match state {
         GuiState::Hidden => 0,
         GuiState::PreListening => 1,
         GuiState::Listening => 1,
-        // Both spinner states map to mode 2; the Typing view also reads `progress`.
+        // All spinner states map to mode 2; the Typing view also reads `progress`.
         GuiState::Transcribing => 2,
+        GuiState::Formatting => 2,
         GuiState::Typing => 2,
         GuiState::Closing => 3,
     }
@@ -743,6 +760,8 @@ fn run_shell(
                         if let Err(e) = component.set_property("progress", Value::Number(state.typing_progress as f64)) {
                             debug!("Failed to set progress: {}", e);
                         }
+                        // Optional property: customized UIs without it just keep the plain spinner.
+                        let _ = component.set_property("status", Value::String(status_label(state.gui_state).into()));
 
                         // Update spectrum for listening mode
                         if state.gui_state == GuiState::Listening || state.gui_state == GuiState::PreListening {
@@ -831,12 +850,26 @@ mod idle_tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         let scheduler = IdleScheduler::new(Duration::from_millis(16));
-        for state in [GuiState::Transcribing, GuiState::Typing, GuiState::Closing] {
+        for state in
+            [GuiState::Transcribing, GuiState::Formatting, GuiState::Typing, GuiState::Closing]
+        {
             assert!(state_has_visible_animation(state));
             assert_eq!(
                 scheduler.decide(true, None),
                 WaitDecision::Frame(Duration::from_millis(16))
             );
+        }
+    }
+
+    #[test]
+    fn bundled_ui_meets_contract_and_labels_formatting() {
+        let ui = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/dictation.slint");
+        validate_ui_contract(ui).unwrap();
+        assert!(std::fs::read_to_string(ui).unwrap().contains("in property <string> status"));
+        assert_eq!(status_label(GuiState::Formatting), "Formatting...");
+        assert_eq!(state_to_mode(GuiState::Formatting), 2);
+        for state in [GuiState::Transcribing, GuiState::Typing, GuiState::Listening] {
+            assert_eq!(status_label(state), "");
         }
     }
 

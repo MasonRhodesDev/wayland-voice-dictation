@@ -31,6 +31,9 @@ pub enum GuiControl {
     /// Transition to transcribing state (ASR running; spinner)
     SetTranscribing,
 
+    /// Transition to formatting state (local LLM formatting pass running; spinner)
+    SetFormatting,
+
     /// Transition to / update typing state as the result is injected.
     /// `done`/`total` are word counts so the GUI can show real progress and
     /// observers can see the work is alive and advancing (not wedged).
@@ -67,6 +70,8 @@ pub enum GuiState {
     Listening,
     /// ASR running — spinner, no progress known yet.
     Transcribing,
+    /// Local LLM formatting pass running — spinner, no progress known.
+    Formatting,
     /// Injecting the result — spinner plus typing progress (see SharedState).
     Typing,
     Closing,

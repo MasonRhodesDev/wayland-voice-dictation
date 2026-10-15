@@ -213,7 +213,7 @@ If the realtime stream fails, the realtime engine transcribes the recorded audio
 
 ### Post-processing stages
 
-Text helpers are named stages: `acronyms`, `punctuation`, `word_substitution`, `fuzzy_vocab`, `grammar` and `llm_correction`. Each engine declares the stages it needs. Parakeet declares the first five. The OpenAI engines declare none, because their output is already punctuated and uses keyword hints for vocabulary.
+Text helpers are named stages: `acronyms`, `punctuation`, `word_substitution`, `fuzzy_vocab`, `grammar`, `llm_correction` and `llm_format`. Each engine declares the stages it needs. Parakeet declares the first five. The OpenAI engines declare none, because their output is already punctuated and uses keyword hints for vocabulary.
 
 The `[pipeline]` section overrides the declaration per engine. `default` keeps the declaration and `none` runs no stages. The `enable_*` switches in `[daemon]` still turn a stage off for every engine.
 
@@ -223,7 +223,7 @@ parakeet = "acronyms,punctuation,word_substitution,fuzzy_vocab"   # local, witho
 openai = "default"                                                # nothing
 ```
 
-`grammar` and `llm_correction` run on the final text only, never on the live preview.
+`grammar`, `llm_correction` and `llm_format` run on the final text only, never on the live preview.
 
 To compare engines or stage lists on one recording, convert it to 16 kHz mono and run:
 
@@ -265,6 +265,24 @@ timeout_ms = 3000
 ```
 
 On a timeout, an expired credential, or a reply that is not an edit of the input, the stage keeps the original text and logs a warning.
+
+### Local LLM formatting
+
+The optional `llm_format` stage sends the final text to an OpenAI-compatible server on your machine, such as a llama.cpp server or Ollama. It removes fillers ("um", "uh") and false starts, and fixes punctuation and casing in the focused app's style. It runs after the other stages and before the text is sanitised and typed. It is off by default; when enabled it runs for every engine, and the HUD shows "Formatting..." while it waits.
+
+```toml
+[llm_backend]                      # shared with future LLM features such as command mode
+url = "http://127.0.0.1:8080"      # llama.cpp; Ollama is http://127.0.0.1:11434
+model = "qwen2.5-3b-instruct"
+
+[llm_format]
+enabled = true
+timeout_ms = 1500                  # then type the unformatted text
+max_edit_percent = 40              # discard replies that change more than this
+skip_categories = "terminal"       # never reformat shell commands
+```
+
+The stage keeps the rule-pipeline text and logs a warning when the server is unreachable, errors or times out, and when a reply is empty, much longer than the input, changes more than `max_edit_percent` of it, or alters a user-dictionary word. Dictionary words are sent as a glossary and must come back exactly as they were. With the stage disabled or the server down, output is the same as without it.
 
 ## Troubleshooting
 

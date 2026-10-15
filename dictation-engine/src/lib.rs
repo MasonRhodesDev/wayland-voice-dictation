@@ -23,6 +23,7 @@ pub mod hotword_trie;
 mod idle_inhibit;
 pub mod ime_probe;
 mod keyboard;
+pub mod llm_backend;
 pub mod model_selector;
 pub mod openai_engine;
 pub mod openai_realtime_engine;
@@ -60,12 +61,13 @@ fn resume_media() {
 use audio_backend::{AudioBackend, AudioBackendConfig, BackendType};
 use dbus_control::DaemonCommand;
 use keyboard::KeyboardInjector;
+use llm_backend::LlmBackendConfig;
 use model_selector::{EngineOptions, ModelSpec, Provider};
 use openai_engine::OpenAiConfig;
 use post_processing::stages::{describe as describe_stages, resolve_stages};
 use post_processing::{
-    LlmCorrectionConfig, Pipeline, PipelinePass, SanitizationProcessor, Stage, StageContext,
-    StageSwitches, StyleRules, TextProcessor, WordSubstitutionProcessor,
+    LlmCorrectionConfig, LlmFormatConfig, Pipeline, PipelinePass, SanitizationProcessor, Stage,
+    StageContext, StageSwitches, StyleRules, TextProcessor, WordSubstitutionProcessor,
 };
 use stream_engine::{StreamingEngine, TranscriptEvent};
 use user_dictionary::UserDictionary;
@@ -93,6 +95,11 @@ struct Config {
     /// Window-class overrides and writing style per app category.
     #[serde(default)]
     app_styles: app_profile::AppStylesConfig,
+    /// Local OpenAI-compatible LLM server, shared by `llm_format` and command mode.
+    #[serde(default)]
+    llm_backend: LlmBackendConfig,
+    #[serde(default)]
+    llm_format: LlmFormatConfig,
 }
 
 /// `[pipeline]`: comma-separated stage names per provider. A missing entry or
@@ -123,7 +130,34 @@ impl Config {
             word_substitution: self.daemon.enable_word_substitution,
             fuzzy_vocab: self.daemon.enable_fuzzy_vocab,
             grammar: self.daemon.enable_grammar,
+            llm_format: self.llm_format.enabled,
         }
+    }
+
+    /// Final-pass stage context for the focused app.
+    fn final_stage_context(
+        &self,
+        user_dict: &Arc<UserDictionary>,
+        word_sub: Option<WordSubstitutionProcessor>,
+        profile: &app_profile::AppProfile,
+    ) -> StageContext {
+        StageContext {
+            user_dict: Some(Arc::clone(user_dict)),
+            word_sub,
+            llm: Some(self.llm_correction.clone()),
+            llm_backend: Some(self.llm_backend.clone()),
+            llm_format: Some(self.llm_format.clone()),
+            category: profile.category,
+            style: profile.style,
+        }
+    }
+
+    /// Whether `llm_format` will call the model for this stage list and app,
+    /// so the HUD can show the formatting state while it runs.
+    fn formats_with_llm(&self, stages: &[Stage], category: window_detect::AppCategory) -> bool {
+        stages.contains(&Stage::LlmFormat)
+            && self.llm_backend.is_configured()
+            && !self.llm_format.skips(category)
     }
 
     /// The stage list for a session: config override, else the engine's
@@ -833,6 +867,8 @@ pub async fn run() -> Result<()> {
             openai: OpenAiConfig::default(),
             llm_correction: LlmCorrectionConfig::default(),
             app_styles: app_profile::AppStylesConfig::default(),
+            llm_backend: LlmBackendConfig::default(),
+            llm_format: LlmFormatConfig::default(),
         }
     });
     let app_styles = app_profile::AppStyles::from_config(&config.app_styles);
@@ -1427,7 +1463,7 @@ pub async fn run() -> Result<()> {
                             let preview_ctx = StageContext {
                                 user_dict: Some(Arc::clone(&user_dict)),
                                 word_sub: word_sub.clone(),
-                                llm: None,
+                                ..StageContext::default()
                             };
                             let mut cancel_rx_preview = cancel_tx.subscribe();
                             preview_task = Some(tokio::spawn(async move {
@@ -1763,13 +1799,15 @@ pub async fn run() -> Result<()> {
                         session_engine.as_ref(),
                         &session_profile.style,
                     );
-                    let final_ctx = StageContext {
-                        user_dict: Some(Arc::clone(&user_dict)),
-                        word_sub: word_sub.clone(),
-                        llm: Some(config.llm_correction.clone()),
-                    };
+                    let final_ctx =
+                        config.final_stage_context(&user_dict, word_sub.clone(), &session_profile);
                     let mut pipeline =
                         Pipeline::from_stages(&final_stages, &final_ctx, PipelinePass::Final);
+                    // The rule stages take milliseconds; llm_format is the only slow
+                    // part of this call, so show it for the whole call.
+                    if config.formats_with_llm(&final_stages, session_profile.category) {
+                        let _ = gui_control_tx.send(GuiControl::SetFormatting);
+                    }
                     // Style rules run last so grammar cannot re-add what they remove.
                     if let Some(style_processor) = session_profile.style.processor() {
                         pipeline.add_processor(style_processor);
@@ -2032,11 +2070,9 @@ pub async fn transcribe_file(
     };
     let final_ms = stopped.elapsed().as_millis();
 
-    let ctx = StageContext {
-        user_dict: Some(Arc::clone(&user_dict)),
-        word_sub,
-        llm: Some(config.llm_correction.clone()),
-    };
+    // No focused window here: format as General, like a dictation with no target.
+    let profile = app_profile::AppStyles::from_config(&config.app_styles).profile(None);
+    let ctx = config.final_stage_context(&user_dict, word_sub, &profile);
     let processed = Pipeline::from_stages(&stages, &ctx, PipelinePass::Final).process(&raw)?;
 
     Ok(FileTranscription {
@@ -2110,9 +2146,22 @@ mod config_tests {
             region = "us-west-2"
             aws_profile = ""
             timeout_ms = 3000
+
+            [llm_backend]
+            url = ""
+            model = ""
+            api_key = ""
+
+            [llm_format]
+            enabled = false
+            timeout_ms = 1500
+            max_edit_percent = 40
+            skip_categories = "terminal"
             "#,
         )
         .unwrap();
+        assert!(!cfg.stage_switches().llm_format);
+        assert!(!cfg.llm_backend.is_configured());
         // OpenAI declares no stages, and "default" keeps that.
         let stages =
             resolve_stages(&[], cfg.pipeline.for_provider(Provider::OpenAi), cfg.stage_switches());
@@ -2129,6 +2178,38 @@ mod config_tests {
         assert_eq!(opts.languages, vec!["en"]);
     }
 
+    /// The TUI writes schema defaults, so they must equal the code defaults:
+    /// a TUI-saved config keeps the LLM pass off and unconfigured.
+    #[test]
+    fn llm_schema_defaults_match_code() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../config-schema.json")).unwrap();
+        let section = |id: &str| -> toml::Table {
+            let s = schema["sections"].as_array().unwrap().iter().find(|s| s["id"] == id).unwrap();
+            s["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| {
+                    let v = match &f["default"] {
+                        serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
+                        serde_json::Value::Number(n) => toml::Value::Integer(n.as_i64().unwrap()),
+                        other => toml::Value::String(other.as_str().unwrap().to_string()),
+                    };
+                    (f["id"].as_str().unwrap().to_string(), v)
+                })
+                .collect()
+        };
+        let fmt: LlmFormatConfig = section("llm_format").try_into().unwrap();
+        let code = LlmFormatConfig::default();
+        assert_eq!(fmt.enabled, code.enabled);
+        assert_eq!(fmt.timeout_ms, code.timeout_ms);
+        assert_eq!(fmt.max_edit_percent, code.max_edit_percent);
+        assert_eq!(fmt.skip_categories, code.skip_categories);
+        let backend: LlmBackendConfig = section("llm_backend").try_into().unwrap();
+        assert!(!backend.is_configured());
+    }
+
     /// The repository schema must keep parsing and must cover every config
     /// section the daemon reads, or a TUI save would drop that section.
     #[test]
@@ -2141,7 +2222,15 @@ mod config_tests {
             .iter()
             .map(|s| s["id"].as_str().unwrap())
             .collect();
-        for section in ["daemon", "pipeline", "openai", "llm_correction", "app_styles"] {
+        for section in [
+            "daemon",
+            "pipeline",
+            "openai",
+            "llm_correction",
+            "app_styles",
+            "llm_backend",
+            "llm_format",
+        ] {
             assert!(ids.contains(&section), "schema is missing section [{section}]");
         }
     }
