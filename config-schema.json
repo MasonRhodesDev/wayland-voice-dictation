@@ -180,6 +180,44 @@
           "type": "boolean",
           "default": true,
           "ui_widget": "toggle"
+        },
+        {
+          "id": "text_writer",
+          "label": "Text Writer",
+          "description": "How dictated text reaches the focused window. 'ime' commits it in one step through the Wayland input-method protocol, falling back to a clipboard paste and then wtype. 'paste' starts at the clipboard paste (the clipboard is restored afterwards). 'wtype' types key by key only. 'voice-dictation diagnose' shows which writer the last dictation used.",
+          "type": "enum",
+          "options_source": {
+            "type": "static",
+            "values": ["ime", "paste", "wtype"]
+          },
+          "default": "ime",
+          "ui_widget": "dropdown"
+        },
+        {
+          "id": "keep_result_in_clipboard",
+          "label": "Keep Result in Clipboard",
+          "description": "Also leave the dictated text on the clipboard after writing it, replacing whatever was there. Off: your clipboard is left alone (or restored after a paste).",
+          "type": "boolean",
+          "default": false,
+          "ui_widget": "toggle"
+        },
+        {
+          "id": "ime_in_terminals",
+          "label": "Fast Writers in Terminals",
+          "description": "Let terminals (kitty, foot, wezterm, ...) use the input-method and paste writers, which deliver the whole dictation at once. Off: terminals are typed into word by word with wtype, because terminal UIs such as Claude Code drop or garble fast input.",
+          "type": "boolean",
+          "default": false,
+          "ui_widget": "toggle"
+        },
+        {
+          "id": "paste_restore_delay_ms",
+          "label": "Paste Restore Delay",
+          "description": "Milliseconds to wait after the paste keystroke before restoring your clipboard. Raise it if slow apps paste your old clipboard instead of the dictation.",
+          "type": "number",
+          "default": 500,
+          "min": 50,
+          "max": 5000,
+          "ui_widget": "number_input"
         }
       ]
     },

@@ -20,7 +20,8 @@ license=('MIT' 'Apache-2.0')
 depends=('wtype' 'pipewire' 'alsa-lib' 'fontconfig' 'freetype2' 'libxkbcommon'
          'wayland' 'systemd')
 makedepends=('rust' 'cargo' 'pkg-config' 'clang')
-optdepends=('playerctl: auto-pause media during recording')
+optdepends=('playerctl: auto-pause media during recording'
+            'wl-clipboard: clipboard-paste text writer')
 provides=('voice-dictation')
 conflicts=('voice-dictation')
 install="$pkgname.install"

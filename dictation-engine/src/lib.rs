@@ -29,6 +29,7 @@ pub mod openai_realtime_engine;
 pub mod parakeet_engine;
 pub mod post_processing;
 pub mod stream_engine;
+pub mod text_writer;
 #[cfg(feature = "tray")]
 mod tray;
 pub mod user_dictionary;
@@ -216,6 +217,25 @@ struct DaemonConfig {
     // injection target is wezterm, which AT-SPI2 cannot see.
     #[serde(default = "default_correction_backend_wezterm")]
     correction_backend_wezterm: bool,
+
+    // First writer in the text writer chain: "ime" (zwp_input_method_v2 →
+    // clipboard paste → wtype), "paste" (paste → wtype) or "wtype".
+    #[serde(default = "default_text_writer")]
+    text_writer: String,
+
+    // Leave the dictated text on the clipboard after writing it (the old
+    // unconditional backup). Off: the paste writer restores the user's clipboard.
+    #[serde(default)]
+    keep_result_in_clipboard: bool,
+
+    // Let terminals use the IME/paste writers too. Off: terminals keep wtype with
+    // the per-word delay, since TUIs (Claude Code's Ink UI) garble bulk input.
+    #[serde(default)]
+    ime_in_terminals: bool,
+
+    // Delay after the paste keystroke before the clipboard snapshot is restored (ms)
+    #[serde(default = "default_paste_restore_delay_ms")]
+    paste_restore_delay_ms: u64,
 }
 
 fn default_model() -> String {
@@ -274,6 +294,12 @@ fn default_enable_accessibility_bridge() -> bool {
 }
 fn default_correction_backend_wezterm() -> bool {
     true
+}
+fn default_text_writer() -> String {
+    "ime".to_string()
+}
+fn default_paste_restore_delay_ms() -> u64 {
+    500
 }
 
 /// Convert decibels to linear amplitude (RMS threshold).
@@ -815,6 +841,10 @@ pub async fn run() -> Result<()> {
                 correction_max_age_days: default_correction_max_age_days(),
                 enable_accessibility_bridge: default_enable_accessibility_bridge(),
                 correction_backend_wezterm: default_correction_backend_wezterm(),
+                text_writer: default_text_writer(),
+                keep_result_in_clipboard: false,
+                ime_in_terminals: false,
+                paste_restore_delay_ms: default_paste_restore_delay_ms(),
             },
             pipeline: PipelineConfig::default(),
             openai: OpenAiConfig::default(),
@@ -1781,34 +1811,23 @@ pub async fn run() -> Result<()> {
                         SanitizationProcessor::new(profile.sanitization.clone(), profile.category);
                     let sanitized_result = sanitizer.process(&processed_result)?;
 
-                    // Copy to clipboard as backup (wl-copy for Wayland)
-                    match tokio::process::Command::new("wl-copy")
-                        .arg(&sanitized_result)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()
-                    {
-                        Ok(_) => {
-                            debug!("Copied to clipboard ({} chars)", sanitized_result.len());
-                        }
-                        Err(e) => {
-                            warn!("Failed to run wl-copy: {}", e);
-                        }
-                    }
-
-                    // Refocus original window before typing (handles window switches during recording)
+                    // Refocus original window before writing (handles window switches during recording)
                     if let Some(ref wt) = window_target {
                         wt.refocus().await.ok();
                     }
 
-                    let expected_typing_secs =
-                        (sanitized_result.len() as u64 * profile.word_delay_ms) / 1000;
-                    if expected_typing_secs > 15 {
-                        warn!("Typing will take ~{}s ({} chars at {}ms/char) — text is already in clipboard if interrupted", expected_typing_secs, sanitized_result.len(), profile.word_delay_ms);
-                    }
+                    let write_request = text_writer::WriteRequest {
+                        text: &sanitized_result,
+                        window_class: window_target.as_ref().map(|wt| wt.class()),
+                        category: profile.category,
+                        word_delay_ms: profile.word_delay_ms,
+                        keep_in_clipboard: config.daemon.keep_result_in_clipboard,
+                        paste_restore_delay: Duration::from_millis(
+                            config.daemon.paste_restore_delay_ms,
+                        ),
+                    };
                     info!(
-                        "Typing final text ({:?} mode, delay={}ms)...",
+                        "Writing final text ({:?} mode, delay={}ms)...",
                         profile.category, profile.word_delay_ms
                     );
                     // Switch the overlay to Typing and stream word-count progress. Throttle to
@@ -1816,20 +1835,23 @@ pub async fn run() -> Result<()> {
                     // final (done == total) update. This progress doubles as a liveness signal.
                     let typing_tx = gui_control_tx.clone();
                     let mut last_sent = 0usize;
-                    keyboard
-                        .type_text_with_progress(
-                            &sanitized_result,
-                            profile.word_delay_ms,
-                            move |done, total| {
-                                let step = (total / 50).max(1);
-                                if done == 0 || done == total || done - last_sent >= step {
-                                    last_sent = done;
-                                    let _ = typing_tx.send(GuiControl::SetTyping { done, total });
-                                }
-                            },
-                        )
-                        .await?;
-                    info!("Typed!");
+                    text_writer::write(
+                        text_writer::chain_for_target(
+                            &config.daemon.text_writer,
+                            profile.category,
+                            config.daemon.ime_in_terminals,
+                        ),
+                        &write_request,
+                        &keyboard,
+                        move |done, total| {
+                            let step = (total / 50).max(1);
+                            if done == 0 || done == total || done - last_sent >= step {
+                                last_sent = done;
+                                let _ = typing_tx.send(GuiControl::SetTyping { done, total });
+                            }
+                        },
+                    )
+                    .await?;
 
                     // Start correction monitoring (background task, non-blocking)
                     #[cfg(feature = "correction")]
@@ -2025,6 +2047,25 @@ pub async fn transcribe_file(
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    /// Configs written before the writer chain existed get the IME-first chain
+    /// and no longer overwrite the clipboard.
+    #[test]
+    fn text_writer_defaults_for_legacy_config() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [daemon]
+            audio_device = "default"
+            sample_rate = "16000"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.daemon.text_writer, "ime");
+        assert!(!cfg.daemon.keep_result_in_clipboard);
+        assert!(!cfg.daemon.ime_in_terminals);
+        assert_eq!(cfg.daemon.paste_restore_delay_ms, 500);
+        assert_eq!(text_writer::chain_for(&cfg.daemon.text_writer), &text_writer::DEFAULT_CHAIN);
+    }
 
     /// A pre-pipeline config (only `[daemon]`) must parse and keep the exact
     /// legacy stage chain for Parakeet.
