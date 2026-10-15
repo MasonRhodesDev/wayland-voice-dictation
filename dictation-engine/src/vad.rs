@@ -74,19 +74,24 @@ pub mod silero {
     const SILERO_VAD_SHA256: &str =
         "b73d9134cc9c86c5a0ac86082fbb74b10d926fe5d0b8a3dd0cee93aa3a2ef5f3";
 
+    /// Length of the model's recurrent state, shape (2, 1, 128).
+    const STATE_LEN: usize = 2 * 128;
+
     /// Silero VAD detector using ONNX Runtime
     pub struct SileroVadDetector {
         session: Session,
         threshold: f32,
-        #[allow(dead_code)]
         sample_rate: i64,
-        /// Internal state tensors for streaming
+        /// Recurrent state carried between frames, shape (2, 1, 128)
         state: Vec<f32>,
-        sr_tensor: Vec<i64>,
         /// Accumulated samples for batch processing
         buffer: Vec<f32>,
         /// Minimum samples needed for VAD (512 for 16kHz, 256 for 8kHz)
         min_samples: usize,
+        /// Tail of the previous frame. Silero v5 expects each frame prefixed
+        /// with the 64 (16 kHz) or 32 (8 kHz) samples before it, and scores
+        /// bare frames as near-certain silence.
+        context: Vec<f32>,
     }
 
     impl SileroVadDetector {
@@ -104,18 +109,16 @@ pub mod silero {
             // Silero VAD requires specific chunk sizes
             let min_samples = if sample_rate == 8000 { 256 } else { 512 };
 
-            // Initialize state: h and c tensors (2, 1, 64)
-            let state = vec![0.0f32; 2 * 64];
-            let sr_tensor = vec![sample_rate as i64];
+            let state = vec![0.0f32; STATE_LEN];
 
             Ok(Self {
                 session,
                 threshold,
                 sample_rate: sample_rate as i64,
                 state,
-                sr_tensor,
                 buffer: Vec::with_capacity(min_samples * 2),
                 min_samples,
+                context: vec![0.0; if sample_rate == 8000 { 32 } else { 64 }],
             })
         }
 
@@ -206,17 +209,25 @@ pub mod silero {
             // Process in chunks of min_samples
             let mut speech_detected = false;
             while self.buffer.len() >= self.min_samples {
-                let chunk: Vec<f32> = self.buffer.drain(..self.min_samples).collect();
+                let frame: Vec<f32> = self.buffer.drain(..self.min_samples).collect();
+                let context_len = self.context.len();
+                let mut chunk = std::mem::replace(
+                    &mut self.context,
+                    frame[self.min_samples - context_len..].to_vec(),
+                );
+                chunk.extend_from_slice(&frame);
 
                 // Prepare input tensors as ort Values
-                let input_array = ndarray::Array2::from_shape_vec((1, self.min_samples), chunk)?;
+                let input_array =
+                    ndarray::Array2::from_shape_vec((1, context_len + self.min_samples), chunk)?;
                 let input_value = Value::from_array(input_array)?;
 
-                let state_array = ndarray::Array3::from_shape_vec((2, 1, 64), self.state.clone())?;
+                let state_array =
+                    ndarray::Array3::from_shape_vec((2, 1, STATE_LEN / 2), self.state.clone())?;
                 let state_value = Value::from_array(state_array)?;
 
-                let sr_array = ndarray::Array1::from_vec(self.sr_tensor.clone());
-                let sr_value = Value::from_array(sr_array)?;
+                // `sr` is a scalar input.
+                let sr_value = Value::from_array(ndarray::arr0(self.sample_rate))?;
 
                 // Run inference
                 let inputs = ort::inputs![
@@ -241,9 +252,9 @@ pub mod silero {
                             self.state = data.to_vec();
                         }
                     }
-                    Err(e) => {
-                        warn!("VAD inference error: {}", e);
-                    }
+                    // Surface it: logging and scoring the frame as silence hid a
+                    // tensor-shape mismatch that failed every frame.
+                    Err(e) => return Err(anyhow::anyhow!("Silero VAD inference failed: {e}")),
                 }
             }
 
@@ -252,7 +263,8 @@ pub mod silero {
 
         fn reset(&mut self) {
             self.buffer.clear();
-            self.state = vec![0.0f32; 2 * 64];
+            self.state = vec![0.0f32; STATE_LEN];
+            self.context.fill(0.0);
         }
 
         fn name(&self) -> &'static str {
@@ -414,6 +426,19 @@ mod tests {
         // Test that it works like DbThresholdVad
         let silence = vec![0i16; 512];
         assert!(!vad.process(&silence).unwrap());
+    }
+
+    #[test]
+    fn test_silero_runs_when_available() {
+        // Only meaningful where the model and ONNX Runtime load; there an
+        // inference error (for example a tensor-shape mismatch) must surface.
+        let mut vad = create_vad(true, 0.5, -40.0, 16000);
+        if vad.name() != "silero" {
+            return;
+        }
+        for _ in 0..4 {
+            assert!(!vad.process(&[0i16; 1600]).unwrap(), "silence is not speech");
+        }
     }
 
     #[test]
