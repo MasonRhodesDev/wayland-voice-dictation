@@ -86,6 +86,42 @@
           "ui_widget": "toggle"
         },
         {
+          "id": "vad_enabled",
+          "label": "Silero VAD",
+          "description": "Detect speech with the Silero neural VAD (model downloaded on first use, needs the ONNX Runtime). When off or unavailable, the dB threshold below is used instead. Capture never drops quiet audio either way.",
+          "type": "boolean",
+          "default": true,
+          "ui_widget": "toggle"
+        },
+        {
+          "id": "vad_threshold",
+          "label": "Silero VAD Threshold",
+          "description": "Speech probability (0.0-1.0) above which Silero counts a chunk as speech.",
+          "type": "number",
+          "default": 0.5,
+          "min": 0.0,
+          "max": 1.0,
+          "ui_widget": "number_input"
+        },
+        {
+          "id": "incremental_finalize",
+          "label": "Incremental Finalization",
+          "description": "Split the recording at pauses the VAD hears and transcribe each finished segment while you are still speaking (local models), so confirming only has the last segment left to transcribe. Off transcribes the whole recording after confirm.",
+          "type": "boolean",
+          "default": true,
+          "ui_widget": "toggle"
+        },
+        {
+          "id": "silence_threshold_db",
+          "label": "Fallback VAD Threshold (dB)",
+          "description": "Level in dBFS above which the fallback VAD counts a chunk as speech. Used when Silero is off or cannot load.",
+          "type": "number",
+          "default": -60.0,
+          "min": -100.0,
+          "max": 0.0,
+          "ui_widget": "number_input"
+        },
+        {
           "id": "trailing_buffer_ms",
           "label": "Trailing Audio Buffer",
           "description": "Duration in milliseconds to continue recording after stop command (captures final words that might otherwise be cut off)",

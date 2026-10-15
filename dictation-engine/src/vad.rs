@@ -13,6 +13,9 @@ pub trait VoiceActivityDetector: Send + Sync {
 
     /// Reset internal state (call between recordings)
     fn reset(&mut self);
+
+    /// Short identifier for logs and diagnostics ("silero" or "db-threshold")
+    fn name(&self) -> &'static str;
 }
 
 /// Simple dB-based VAD (always available)
@@ -51,6 +54,10 @@ impl VoiceActivityDetector for DbThresholdVad {
     fn reset(&mut self) {
         // No state to reset
     }
+
+    fn name(&self) -> &'static str {
+        "db-threshold"
+    }
 }
 
 /// Silero VAD implementation using ONNX model
@@ -67,19 +74,24 @@ pub mod silero {
     const SILERO_VAD_SHA256: &str =
         "b73d9134cc9c86c5a0ac86082fbb74b10d926fe5d0b8a3dd0cee93aa3a2ef5f3";
 
+    /// Length of the model's recurrent state, shape (2, 1, 128).
+    const STATE_LEN: usize = 2 * 128;
+
     /// Silero VAD detector using ONNX Runtime
     pub struct SileroVadDetector {
         session: Session,
         threshold: f32,
-        #[allow(dead_code)]
         sample_rate: i64,
-        /// Internal state tensors for streaming
+        /// Recurrent state carried between frames, shape (2, 1, 128)
         state: Vec<f32>,
-        sr_tensor: Vec<i64>,
         /// Accumulated samples for batch processing
         buffer: Vec<f32>,
         /// Minimum samples needed for VAD (512 for 16kHz, 256 for 8kHz)
         min_samples: usize,
+        /// Tail of the previous frame. Silero v5 expects each frame prefixed
+        /// with the 64 (16 kHz) or 32 (8 kHz) samples before it, and scores
+        /// bare frames as near-certain silence.
+        context: Vec<f32>,
     }
 
     impl SileroVadDetector {
@@ -97,18 +109,16 @@ pub mod silero {
             // Silero VAD requires specific chunk sizes
             let min_samples = if sample_rate == 8000 { 256 } else { 512 };
 
-            // Initialize state: h and c tensors (2, 1, 64)
-            let state = vec![0.0f32; 2 * 64];
-            let sr_tensor = vec![sample_rate as i64];
+            let state = vec![0.0f32; STATE_LEN];
 
             Ok(Self {
                 session,
                 threshold,
                 sample_rate: sample_rate as i64,
                 state,
-                sr_tensor,
                 buffer: Vec::with_capacity(min_samples * 2),
                 min_samples,
+                context: vec![0.0; if sample_rate == 8000 { 32 } else { 64 }],
             })
         }
 
@@ -199,17 +209,25 @@ pub mod silero {
             // Process in chunks of min_samples
             let mut speech_detected = false;
             while self.buffer.len() >= self.min_samples {
-                let chunk: Vec<f32> = self.buffer.drain(..self.min_samples).collect();
+                let frame: Vec<f32> = self.buffer.drain(..self.min_samples).collect();
+                let context_len = self.context.len();
+                let mut chunk = std::mem::replace(
+                    &mut self.context,
+                    frame[self.min_samples - context_len..].to_vec(),
+                );
+                chunk.extend_from_slice(&frame);
 
                 // Prepare input tensors as ort Values
-                let input_array = ndarray::Array2::from_shape_vec((1, self.min_samples), chunk)?;
+                let input_array =
+                    ndarray::Array2::from_shape_vec((1, context_len + self.min_samples), chunk)?;
                 let input_value = Value::from_array(input_array)?;
 
-                let state_array = ndarray::Array3::from_shape_vec((2, 1, 64), self.state.clone())?;
+                let state_array =
+                    ndarray::Array3::from_shape_vec((2, 1, STATE_LEN / 2), self.state.clone())?;
                 let state_value = Value::from_array(state_array)?;
 
-                let sr_array = ndarray::Array1::from_vec(self.sr_tensor.clone());
-                let sr_value = Value::from_array(sr_array)?;
+                // `sr` is a scalar input.
+                let sr_value = Value::from_array(ndarray::arr0(self.sample_rate))?;
 
                 // Run inference
                 let inputs = ort::inputs![
@@ -234,9 +252,9 @@ pub mod silero {
                             self.state = data.to_vec();
                         }
                     }
-                    Err(e) => {
-                        warn!("VAD inference error: {}", e);
-                    }
+                    // Surface it: logging and scoring the frame as silence hid a
+                    // tensor-shape mismatch that failed every frame.
+                    Err(e) => return Err(anyhow::anyhow!("Silero VAD inference failed: {e}")),
                 }
             }
 
@@ -245,7 +263,12 @@ pub mod silero {
 
         fn reset(&mut self) {
             self.buffer.clear();
-            self.state = vec![0.0f32; 2 * 64];
+            self.state = vec![0.0f32; STATE_LEN];
+            self.context.fill(0.0);
+        }
+
+        fn name(&self) -> &'static str {
+            "silero"
         }
     }
 }
@@ -299,6 +322,77 @@ pub fn create_vad(
     Box::new(DbThresholdVad::new(silence_threshold_db))
 }
 
+/// Where `create_vad` keeps the Silero model (`silero_vad.onnx`).
+pub fn silero_model_path() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("voice-dictation")
+        .join("models")
+        .join("silero_vad.onnx")
+}
+
+/// Per-session speech statistics, built by feeding the VAD every captured chunk.
+///
+/// Offsets are in samples from the start of the session, so they line up with
+/// the engine's audio buffer (capture forwards every buffer, quiet ones too).
+#[derive(Debug, Default)]
+pub struct SpeechTracker {
+    total: u64,
+    speech: u64,
+    first_speech: Option<u64>,
+    last_speech_end: Option<u64>,
+}
+
+impl SpeechTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one chunk of `len` samples and the VAD's verdict for it.
+    pub fn observe(&mut self, len: usize, is_speech: bool) {
+        let start = self.total;
+        self.total += len as u64;
+        if is_speech {
+            self.speech += len as u64;
+            self.first_speech.get_or_insert(start);
+            self.last_speech_end = Some(self.total);
+        }
+    }
+
+    pub fn total_samples(&self) -> u64 {
+        self.total
+    }
+
+    pub fn speech_samples(&self) -> u64 {
+        self.speech
+    }
+
+    /// Leading silence before the first speech chunk, if any speech was seen.
+    pub fn leading_silence(&self) -> Option<u64> {
+        self.first_speech
+    }
+
+    /// Trailing silence after the last speech chunk, if any speech was seen.
+    pub fn trailing_silence(&self) -> Option<u64> {
+        self.last_speech_end.map(|end| self.total - end)
+    }
+
+    /// One-line summary for logs, with durations in milliseconds.
+    pub fn summary(&self, sample_rate: u32) -> String {
+        let ms = |n: u64| n * 1000 / sample_rate.max(1) as u64;
+        match (self.leading_silence(), self.trailing_silence()) {
+            (Some(lead), Some(trail)) => format!(
+                "{}ms captured, {}ms speech, {}ms leading / {}ms trailing silence",
+                ms(self.total),
+                ms(self.speech),
+                ms(lead),
+                ms(trail)
+            ),
+            _ => format!("{}ms captured, no speech detected", ms(self.total)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +429,19 @@ mod tests {
     }
 
     #[test]
+    fn test_silero_runs_when_available() {
+        // Only meaningful where the model and ONNX Runtime load; there an
+        // inference error (for example a tensor-shape mismatch) must surface.
+        let mut vad = create_vad(true, 0.5, -40.0, 16000);
+        if vad.name() != "silero" {
+            return;
+        }
+        for _ in 0..4 {
+            assert!(!vad.process(&[0i16; 1600]).unwrap(), "silence is not speech");
+        }
+    }
+
+    #[test]
     fn test_create_vad_disabled() {
         let mut vad = create_vad(false, 0.5, -40.0, 16000);
 
@@ -360,5 +467,37 @@ mod tests {
         // Silence should be very negative
         let db = DbThresholdVad::rms_to_db(0.0);
         assert!(db < -90.0);
+    }
+
+    #[test]
+    fn test_create_vad_disabled_is_db_threshold() {
+        assert_eq!(create_vad(false, 0.5, -40.0, 16000).name(), "db-threshold");
+    }
+
+    #[test]
+    fn test_speech_tracker_offsets() {
+        let mut t = SpeechTracker::new();
+        t.observe(1600, false);
+        t.observe(800, true);
+        t.observe(800, false);
+        t.observe(800, true);
+        t.observe(3200, false);
+        assert_eq!(t.total_samples(), 7200);
+        assert_eq!(t.speech_samples(), 1600);
+        assert_eq!(t.leading_silence(), Some(1600));
+        assert_eq!(t.trailing_silence(), Some(3200));
+        assert_eq!(
+            t.summary(16000),
+            "450ms captured, 100ms speech, 100ms leading / 200ms trailing silence"
+        );
+    }
+
+    #[test]
+    fn test_speech_tracker_no_speech() {
+        let mut t = SpeechTracker::new();
+        t.observe(16000, false);
+        assert_eq!(t.leading_silence(), None);
+        assert_eq!(t.trailing_silence(), None);
+        assert_eq!(t.summary(16000), "1000ms captured, no speech detected");
     }
 }

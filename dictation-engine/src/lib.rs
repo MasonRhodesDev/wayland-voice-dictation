@@ -168,8 +168,24 @@ struct DaemonConfig {
     enable_fuzzy_vocab: bool,
 
     // Audio capture
+    // Speech threshold for the dB fallback VAD (used when Silero is disabled or
+    // cannot load). Capture itself never drops quiet audio.
     #[serde(default = "default_silence_threshold_db")]
     silence_threshold_db: f32,
+
+    // Voice activity detection: Silero (neural) when enabled and loadable,
+    // otherwise the dB threshold above.
+    #[serde(default = "default_vad_enabled")]
+    vad_enabled: bool,
+    // Silero speech probability threshold (0.0-1.0)
+    #[serde(default = "default_vad_threshold")]
+    vad_threshold: f32,
+    // Split the recording at the VAD's pauses and transcribe each closed
+    // segment once while recording (local models), so confirm only has the
+    // last segment left to transcribe.
+    #[serde(default = "default_incremental_finalize")]
+    incremental_finalize: bool,
+
     #[serde(default = "default_debug_audio")]
     debug_audio: bool,
 
@@ -239,6 +255,15 @@ fn default_enable_word_substitution() -> bool {
 fn default_silence_threshold_db() -> f32 {
     -60.0
 }
+fn default_vad_enabled() -> bool {
+    true
+}
+fn default_vad_threshold() -> f32 {
+    0.5
+}
+fn default_incremental_finalize() -> bool {
+    true
+}
 fn default_debug_audio() -> bool {
     false
 }
@@ -274,11 +299,6 @@ fn default_enable_accessibility_bridge() -> bool {
 }
 fn default_correction_backend_wezterm() -> bool {
     true
-}
-
-/// Convert decibels to linear amplitude (RMS threshold).
-fn db_to_linear(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
 }
 
 fn load_config() -> Result<Config> {
@@ -803,6 +823,9 @@ pub async fn run() -> Result<()> {
                 enable_word_substitution: default_enable_word_substitution(),
                 enable_fuzzy_vocab: default_enable_fuzzy_vocab(),
                 silence_threshold_db: default_silence_threshold_db(),
+                vad_enabled: default_vad_enabled(),
+                vad_threshold: default_vad_threshold(),
+                incremental_finalize: default_incremental_finalize(),
                 debug_audio: default_debug_audio(),
                 trailing_buffer_ms: default_trailing_buffer_ms(),
                 audio_backend: default_audio_backend(),
@@ -826,13 +849,6 @@ pub async fn run() -> Result<()> {
         warn!("Invalid sample_rate '{}', defaulting to 16000", config.daemon.sample_rate);
         16000
     });
-
-    // Convert silence threshold from dB to linear RMS value
-    let silence_threshold = db_to_linear(config.daemon.silence_threshold_db);
-    info!(
-        "Silence threshold: {:.1}dB ({:.6} linear)",
-        config.daemon.silence_threshold_db, silence_threshold
-    );
 
     info!(
         "Config loaded: audio_device={}, sample_rate={}",
@@ -1068,11 +1084,7 @@ pub async fn run() -> Result<()> {
     info!("Creating DeviceManager with pre-loaded audio backend...");
     let device_manager_config = DeviceManagerConfig {
         backend_type,
-        backend_config: AudioBackendConfig {
-            device_name: audio_device_name.clone(),
-            sample_rate,
-            silence_threshold,
-        },
+        backend_config: AudioBackendConfig { device_name: audio_device_name.clone(), sample_rate },
         idle_release_timeout_secs: config.daemon.idle_release_timeout_secs,
     };
     let mut device_manager = DeviceManager::new(device_manager_config, audio_tx)?;
@@ -1210,6 +1222,37 @@ pub async fn run() -> Result<()> {
         warn!("Failed to notify systemd (Ready): {}", e);
     }
 
+    // Voice activity detection. Built after READY and off the async runtime:
+    // the first run downloads the Silero model with a blocking HTTP client,
+    // and nothing needs the VAD before the first recording.
+    let vad = {
+        let (mut enabled, threshold, threshold_db) = (
+            config.daemon.vad_enabled,
+            config.daemon.vad_threshold,
+            config.daemon.silence_threshold_db,
+        );
+        // Silero only models 8 kHz and 16 kHz audio.
+        if enabled && !matches!(sample_rate, 8000 | 16000) {
+            warn!("Silero VAD needs an 8000 or 16000 Hz sample rate, not {}", sample_rate);
+            enabled = false;
+        }
+        let vad = tokio::task::spawn_blocking(move || {
+            vad::create_vad(enabled, threshold, threshold_db, sample_rate)
+        })
+        .await?;
+        match (enabled, vad.name()) {
+            (true, "silero") => {
+                info!("VAD: silero (speech probability threshold {})", threshold)
+            }
+            (true, name) => warn!(
+                "VAD: {} at {:.1}dB (Silero enabled but unavailable, see warnings above)",
+                name, threshold_db
+            ),
+            (false, name) => info!("VAD: {} at {:.1}dB (Silero disabled)", name, threshold_db),
+        }
+        Arc::new(std::sync::Mutex::new(vad))
+    };
+
     // State machine variables
     let mut daemon_state = DaemonState::Idle;
     let mut session: Option<RecordingSession> = None;
@@ -1331,8 +1374,17 @@ pub async fn run() -> Result<()> {
                             let trailing_buffer_ms = config.daemon.trailing_buffer_ms;
                             let health_clone = Arc::clone(&health_state);
                             let audio_notify_tx = Arc::clone(&audio_notify);
+                            let vad_clone = Arc::clone(&vad);
+                            let incremental_finalize = config.daemon.incremental_finalize;
+                            let vad_name = {
+                                let mut v = vad.lock().unwrap_or_else(|e| e.into_inner());
+                                v.reset();
+                                v.name()
+                            };
+                            info!("Session VAD: {}", vad_name);
                             audio_task = Some(tokio::spawn(async move {
                                 let mut buffer = Vec::new();
+                                let mut speech = vad::SpeechTracker::new();
                                 let trailing_duration = Duration::from_millis(trailing_buffer_ms);
                                 let mut trailing_deadline: Option<tokio::time::Instant> = None;
 
@@ -1376,7 +1428,20 @@ pub async fn run() -> Result<()> {
                                                         let _ = spectrum_tx_clone.send(chunk);
                                                     }
 
-                                                    if let Err(e) = engine_clone.process_audio(&samples) {
+                                                    let verdict = vad_clone
+                                                        .lock()
+                                                        .unwrap_or_else(|e| e.into_inner())
+                                                        .process(&samples)
+                                                        .map_err(|e| debug!("VAD error: {}", e))
+                                                        .ok();
+                                                    speech.observe(samples.len(), verdict == Some(true));
+
+                                                    let fed = if incremental_finalize {
+                                                        engine_clone.process_audio_with_vad(&samples, verdict)
+                                                    } else {
+                                                        engine_clone.process_audio(&samples)
+                                                    };
+                                                    if let Err(e) = fed {
                                                         error!("Processing error: {}", e);
                                                     }
                                                     audio_notify_tx.notify_one();
@@ -1389,6 +1454,11 @@ pub async fn run() -> Result<()> {
                                         }
                                     }
                                 }
+                                info!(
+                                    "Session audio ({}): {}",
+                                    vad_name,
+                                    speech.summary(sample_rate)
+                                );
                                 debug!("Audio task: exiting gracefully");
                             }));
 
@@ -1914,6 +1984,8 @@ pub async fn run() -> Result<()> {
 pub struct FileTranscription {
     pub model: String,
     pub stages: String,
+    /// VAD that segmented the audio, or "off" without incremental finalization.
+    pub vad: String,
     pub raw: String,
     pub processed: String,
     pub partials: usize,
@@ -1965,13 +2037,34 @@ pub async fn transcribe_file(
         None => config.session_stages(&spec, engine.as_ref()),
     };
 
+    // Same VAD as the daemon, so segments close at the same pauses. Built off
+    // the runtime: the first run downloads the Silero model.
+    let mut vad = if config.daemon.incremental_finalize {
+        let d = &config.daemon;
+        let (enabled, threshold, threshold_db) =
+            (d.vad_enabled, d.vad_threshold, d.silence_threshold_db);
+        Some(
+            tokio::task::spawn_blocking(move || {
+                vad::create_vad(enabled, threshold, threshold_db, 16_000)
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let vad_name = vad.as_ref().map_or("off", |v| v.name()).to_string();
+
     engine.reset();
     let mut rx = engine.subscribe();
     let started = Instant::now();
     let mut partials = 0usize;
     let mut first_partial_ms = None;
     for chunk in samples.chunks(1_600) {
-        engine.process_audio(chunk)?;
+        match vad.as_mut() {
+            Some(vad) => engine.process_audio_with_vad(chunk, vad.process(chunk).ok())?,
+            None => engine.process_audio(chunk)?,
+        }
         if paced {
             let tick = tokio::time::sleep(Duration::from_millis(100));
             tokio::pin!(tick);
@@ -2013,6 +2106,7 @@ pub async fn transcribe_file(
     Ok(FileTranscription {
         model: spec.to_string(),
         stages: describe_stages(&stages),
+        vad: vad_name,
         raw,
         processed,
         partials,
