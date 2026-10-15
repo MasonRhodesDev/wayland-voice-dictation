@@ -392,6 +392,80 @@
           "ui_widget": "number_input"
         }
       ]
+    },
+    {
+      "id": "llm_backend",
+      "title": "Local LLM Backend",
+      "description": "An OpenAI-compatible chat server on this machine (llama.cpp server, Ollama). Used by LLM Formatting. Nothing is sent anywhere unless the URL points elsewhere.",
+      "fields": [
+        {
+          "id": "url",
+          "label": "Server URL",
+          "description": "Base URL, e.g. http://127.0.0.1:8080 (llama.cpp) or http://127.0.0.1:11434 (Ollama). /v1/chat/completions is appended. Empty disables the backend.",
+          "type": "string",
+          "default": "",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "model",
+          "label": "Model",
+          "description": "Model name sent with each request (Ollama needs it; llama.cpp ignores it). Empty disables the backend.",
+          "type": "string",
+          "default": "",
+          "ui_widget": "text_input"
+        },
+        {
+          "id": "api_key",
+          "label": "API Key",
+          "description": "Optional bearer token. Leave empty for local servers.",
+          "type": "string",
+          "default": "",
+          "ui_widget": "text_input"
+        }
+      ]
+    },
+    {
+      "id": "llm_format",
+      "title": "LLM Formatting",
+      "description": "Optional pass after the rule stages and before typing: the local LLM removes fillers and false starts and fixes punctuation and casing in the focused app's style. Needs Local LLM Backend. On timeout, error, or a reply that adds words, drops more than fillers, or alters a dictionary word, the rule-pipeline text is typed instead.",
+      "fields": [
+        {
+          "id": "enabled",
+          "label": "Enabled",
+          "description": "Run the formatting pass for every engine. Off by default.",
+          "type": "boolean",
+          "default": false,
+          "ui_widget": "toggle"
+        },
+        {
+          "id": "timeout_ms",
+          "label": "Timeout",
+          "description": "Milliseconds to wait for the model before typing the unformatted text.",
+          "type": "number",
+          "default": 1500,
+          "min": 200,
+          "max": 10000,
+          "ui_widget": "number_input"
+        },
+        {
+          "id": "max_dropped_words",
+          "label": "Max Dropped Words",
+          "description": "How many words besides fillers (um, like, you know) and repeats a reply may delete. Replies that add any word or drop more are discarded.",
+          "type": "number",
+          "default": 1,
+          "min": 0,
+          "max": 10,
+          "ui_widget": "number_input"
+        },
+        {
+          "id": "skip_categories",
+          "label": "Skip Categories",
+          "description": "Comma-separated app categories that skip the pass (terminal, editor, chat, browser, email, general).",
+          "type": "string",
+          "default": "terminal",
+          "ui_widget": "text_input"
+        }
+      ]
     }
   ]
 }

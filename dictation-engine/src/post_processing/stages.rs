@@ -12,6 +12,8 @@
 //! 2. Otherwise the stages the engine declares.
 //! 3. The legacy `enable_*` flags then act as global off switches, so an
 //!    existing config keeps its exact behavior.
+//! 4. `llm_format` follows `[llm_format] enabled` alone: when on it is added
+//!    for every engine, when off it is removed even if listed.
 
 use std::sync::Arc;
 
@@ -19,9 +21,12 @@ use tracing::{debug, warn};
 
 use super::{
     AcronymProcessor, FuzzyVocabularyProcessor, GrammarProcessor, LlmCorrectionConfig,
-    LlmCorrectionProcessor, Pipeline, PunctuationProcessor, WordSubstitutionProcessor,
+    LlmCorrectionProcessor, LlmFormatConfig, LlmFormatProcessor, Pipeline, PunctuationProcessor,
+    StyleRules, WordSubstitutionProcessor,
 };
+use crate::llm_backend::LlmBackendConfig;
 use crate::user_dictionary::UserDictionary;
+use crate::window_detect::AppCategory;
 
 /// One post-processing step. The string names are the config vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,17 +43,20 @@ pub enum Stage {
     Grammar,
     /// LLM rewrite of the final text (self-corrections, glossary terms).
     LlmCorrection,
+    /// Local LLM formatting: fillers, false starts, punctuation, casing.
+    LlmFormat,
 }
 
 /// Canonical application order. A resolved stage list is always sorted into
 /// this order, so config order cannot produce a different result.
-const ORDER: [Stage; 6] = [
+const ORDER: [Stage; 7] = [
     Stage::Acronyms,
     Stage::Punctuation,
     Stage::WordSubstitution,
     Stage::FuzzyVocab,
     Stage::Grammar,
     Stage::LlmCorrection,
+    Stage::LlmFormat,
 ];
 
 /// The helper chain the local models need (and had before stages existed).
@@ -69,6 +77,7 @@ impl Stage {
             Stage::FuzzyVocab => "fuzzy_vocab",
             Stage::Grammar => "grammar",
             Stage::LlmCorrection => "llm_correction",
+            Stage::LlmFormat => "llm_format",
         }
     }
 
@@ -77,14 +86,15 @@ impl Stage {
     }
 
     /// Whether the stage is cheap enough to run on every live preview update.
-    /// Grammar and LLM correction run on the final text only.
+    /// Grammar and the LLM stages run on the final text only.
     pub fn runs_in_preview(self) -> bool {
-        !matches!(self, Stage::Grammar | Stage::LlmCorrection)
+        !matches!(self, Stage::Grammar | Stage::LlmCorrection | Stage::LlmFormat)
     }
 }
 
 /// Legacy global switches from `[daemon]`. A `false` removes the stage from
-/// every engine's plan.
+/// every engine's plan. `llm_format` comes from `[llm_format] enabled`; unlike
+/// the others it is off by default and adds the stage when on.
 #[derive(Debug, Clone, Copy)]
 pub struct StageSwitches {
     pub acronyms: bool,
@@ -92,6 +102,7 @@ pub struct StageSwitches {
     pub word_substitution: bool,
     pub fuzzy_vocab: bool,
     pub grammar: bool,
+    pub llm_format: bool,
 }
 
 impl Default for StageSwitches {
@@ -102,6 +113,7 @@ impl Default for StageSwitches {
             word_substitution: true,
             fuzzy_vocab: true,
             grammar: true,
+            llm_format: false,
         }
     }
 }
@@ -115,6 +127,7 @@ impl StageSwitches {
             Stage::FuzzyVocab => self.fuzzy_vocab,
             Stage::Grammar => self.grammar,
             Stage::LlmCorrection => true, // opt-in by listing it; no legacy flag
+            Stage::LlmFormat => self.llm_format,
         }
     }
 }
@@ -153,7 +166,10 @@ pub fn resolve_stages(
     config_override: Option<&str>,
     switches: StageSwitches,
 ) -> Vec<Stage> {
-    let chosen = parse_stage_list(config_override).unwrap_or_else(|| declared.to_vec());
+    let mut chosen = parse_stage_list(config_override).unwrap_or_else(|| declared.to_vec());
+    if switches.llm_format {
+        chosen.push(Stage::LlmFormat);
+    }
     ORDER.iter().copied().filter(|s| chosen.contains(s) && switches.allows(*s)).collect()
 }
 
@@ -172,6 +188,12 @@ pub struct StageContext {
     pub user_dict: Option<Arc<UserDictionary>>,
     pub word_sub: Option<WordSubstitutionProcessor>,
     pub llm: Option<LlmCorrectionConfig>,
+    /// `[llm_backend]`, shared by `llm_format` and command mode.
+    pub llm_backend: Option<LlmBackendConfig>,
+    pub llm_format: Option<LlmFormatConfig>,
+    /// The focused app's category and style, for `llm_format`'s prompt.
+    pub category: AppCategory,
+    pub style: StyleRules,
 }
 
 /// Which pass a pipeline serves. Preview drops the slow final-only stages.
@@ -217,6 +239,20 @@ impl Pipeline {
                     )),
                     _ => warn!(
                         "pipeline: llm_correction listed but [llm_correction] model is not set; skipping"
+                    ),
+                },
+                Stage::LlmFormat => match &ctx.llm_backend {
+                    Some(backend) if backend.is_configured() => {
+                        pipeline.add_processor(Box::new(LlmFormatProcessor::new(
+                            backend.clone(),
+                            ctx.llm_format.clone().unwrap_or_default(),
+                            ctx.category,
+                            ctx.style,
+                            ctx.user_dict.clone(),
+                        )))
+                    }
+                    _ => warn!(
+                        "pipeline: llm_format enabled but [llm_backend] url and model are not set; skipping"
                     ),
                 },
             }
@@ -273,6 +309,41 @@ mod tests {
     fn unknown_names_are_skipped() {
         let got = resolve_stages(&[], Some("grammar,bogus"), StageSwitches::default());
         assert_eq!(got, vec![Stage::Grammar]);
+    }
+
+    #[test]
+    fn llm_format_follows_its_switch_only() {
+        let on = StageSwitches { llm_format: true, ..StageSwitches::default() };
+        // Off by default, even when listed.
+        assert!(!resolve_stages(LOCAL_MODEL_STAGES, None, StageSwitches::default())
+            .contains(&Stage::LlmFormat));
+        assert!(resolve_stages(&[], Some("llm_format"), StageSwitches::default()).is_empty());
+        // On: added last for local and hosted engines alike.
+        let local = resolve_stages(LOCAL_MODEL_STAGES, None, on);
+        assert_eq!(local.last(), Some(&Stage::LlmFormat));
+        assert_eq!(local.len(), LOCAL_MODEL_STAGES.len() + 1);
+        assert_eq!(resolve_stages(&[], None, on), vec![Stage::LlmFormat]);
+        assert_eq!(
+            resolve_stages(&[], Some("llm_correction, llm_format"), on),
+            vec![Stage::LlmCorrection, Stage::LlmFormat]
+        );
+    }
+
+    #[test]
+    fn llm_format_needs_a_backend() {
+        let stages = [Stage::LlmFormat];
+        let ctx = StageContext::default();
+        assert!(Pipeline::from_stages(&stages, &ctx, PipelinePass::Final).is_empty());
+        let ctx = StageContext {
+            llm_backend: Some(LlmBackendConfig {
+                url: "http://127.0.0.1:1".into(),
+                model: "m".into(),
+                api_key: String::new(),
+            }),
+            ..StageContext::default()
+        };
+        assert_eq!(Pipeline::from_stages(&stages, &ctx, PipelinePass::Final).len(), 1);
+        assert!(Pipeline::from_stages(&stages, &ctx, PipelinePass::Preview).is_empty());
     }
 
     #[test]

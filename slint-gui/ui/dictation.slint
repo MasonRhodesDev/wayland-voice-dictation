@@ -18,6 +18,9 @@
 // fade: float - Overall opacity (0.0-1.0) for transitions
 // closing-progress: float - Collapse animation progress (0.0-1.0)
 // pre-listening: bool - Shows "Starting..." instead of spectrum
+// status: string - Optional label beside the processing spinner (mode 2),
+//                  e.g. "Formatting..." while the local LLM pass runs.
+//                  Empty shows the plain spinner. Optional: custom UIs may omit it.
 // ============================================================================
 
 export component Dictation inherits Window {
@@ -38,6 +41,9 @@ export component Dictation inherits Window {
 
     // Typing progress (0.0-1.0), shown during processing/typing (mode == 2).
     in property <float> progress: 0.0;
+
+    // Optional label beside the spinner in mode 2 (empty = plain spinner).
+    in property <string> status: "";
 
     // Closing mode properties
     in property <float> closing-progress: 0.0;
@@ -99,10 +105,21 @@ export component Dictation inherits Window {
 
     // ========== PROCESSING MODE (mode == 2) ==========
     if mode == 2: Rectangle {
-        width: 60px;
+        width: status == "" ? 60px : 200px;
         height: 60px;
         background: #000000.with_alpha(0.9 * fade);
         border-radius: 30px;
+
+        if status != "": Text {
+            x: 56px;
+            width: parent.width - 56px - 20px;
+            height: parent.height;
+            text: status;
+            color: white.with_alpha(fade);
+            font-size: 15px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
 
         // Spinner - 8 dots in a circle
         Rectangle {

@@ -2,6 +2,7 @@ mod acronym;
 mod fuzzy_vocab;
 mod grammar;
 mod llm_correction;
+mod llm_format;
 mod punctuation;
 mod sanitize;
 pub mod stages;
@@ -16,6 +17,7 @@ pub use acronym::AcronymProcessor;
 pub use fuzzy_vocab::FuzzyVocabularyProcessor;
 pub use grammar::GrammarProcessor;
 pub use llm_correction::{LlmCorrectionConfig, LlmCorrectionProcessor};
+pub use llm_format::{LlmFormatConfig, LlmFormatProcessor};
 pub use punctuation::PunctuationProcessor;
 pub use sanitize::SanitizationProcessor;
 pub use sanitize::SanitizationRules;
@@ -93,9 +95,10 @@ impl Pipeline {
             word_substitution: enable_word_substitution,
             fuzzy_vocab: enable_fuzzy_vocab,
             grammar: enable_grammar,
+            llm_format: false,
         };
         let stages = stages::resolve_stages(LOCAL_MODEL_STAGES, None, switches);
-        let ctx = StageContext { user_dict, word_sub, llm: None };
+        let ctx = StageContext { user_dict, word_sub, ..StageContext::default() };
         Self::from_stages(&stages, &ctx, PipelinePass::Final)
     }
 
