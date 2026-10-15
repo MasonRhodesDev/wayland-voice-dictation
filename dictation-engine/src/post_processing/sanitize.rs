@@ -33,7 +33,10 @@ impl SanitizationRules {
                 strip_control_chars: true,
                 strip_ansi_escapes: true,
             },
-            AppCategory::Browser | AppCategory::Chat | AppCategory::General => Self {
+            AppCategory::Browser
+            | AppCategory::Chat
+            | AppCategory::Email
+            | AppCategory::General => Self {
                 escape_shell_chars: false,
                 strip_control_chars: true,
                 strip_ansi_escapes: true,
@@ -429,6 +432,10 @@ mod tests {
         // Chat does NOT escape shell chars
         let chat = SanitizationRules::for_category(AppCategory::Chat);
         assert!(!chat.escape_shell_chars);
+
+        // Email does NOT escape shell chars
+        let email = SanitizationRules::for_category(AppCategory::Email);
+        assert!(!email.escape_shell_chars);
 
         // General does NOT escape shell chars
         let general = SanitizationRules::for_category(AppCategory::General);

@@ -65,7 +65,7 @@ use openai_engine::OpenAiConfig;
 use post_processing::stages::{describe as describe_stages, resolve_stages};
 use post_processing::{
     LlmCorrectionConfig, Pipeline, PipelinePass, SanitizationProcessor, Stage, StageContext,
-    StageSwitches, TextProcessor, WordSubstitutionProcessor,
+    StageSwitches, StyleRules, TextProcessor, WordSubstitutionProcessor,
 };
 use stream_engine::{StreamingEngine, TranscriptEvent};
 use user_dictionary::UserDictionary;
@@ -90,6 +90,9 @@ struct Config {
     openai: OpenAiConfig,
     #[serde(default)]
     llm_correction: LlmCorrectionConfig,
+    /// Window-class overrides and writing style per app category.
+    #[serde(default)]
+    app_styles: app_profile::AppStylesConfig,
 }
 
 /// `[pipeline]`: comma-separated stage names per provider. A missing entry or
@@ -126,10 +129,20 @@ impl Config {
     /// The stage list for a session: config override, else the engine's
     /// declaration, then the legacy switches.
     fn session_stages(&self, spec: &ModelSpec, engine: &dyn StreamingEngine) -> Vec<Stage> {
+        self.app_session_stages(spec, engine, &StyleRules::default())
+    }
+
+    /// [`Self::session_stages`] narrowed by the focused app's writing style.
+    fn app_session_stages(
+        &self,
+        spec: &ModelSpec,
+        engine: &dyn StreamingEngine,
+        style: &StyleRules,
+    ) -> Vec<Stage> {
         resolve_stages(
             &engine.default_stages(),
             self.pipeline.for_provider(spec.provider),
-            self.stage_switches(),
+            style.restrict(self.stage_switches()),
         )
     }
 
@@ -819,8 +832,10 @@ pub async fn run() -> Result<()> {
             pipeline: PipelineConfig::default(),
             openai: OpenAiConfig::default(),
             llm_correction: LlmCorrectionConfig::default(),
+            app_styles: app_profile::AppStylesConfig::default(),
         }
     });
+    let app_styles = app_profile::AppStyles::from_config(&config.app_styles);
 
     let sample_rate: u32 = config.daemon.sample_rate.parse().unwrap_or_else(|_| {
         warn!("Invalid sample_rate '{}', defaulting to 16000", config.daemon.sample_rate);
@@ -1218,6 +1233,7 @@ pub async fn run() -> Result<()> {
     let mut media_was_playing = false;
     let mut _idle_inhibit: Option<idle_inhibit::IdleInhibitor> = None;
     let mut window_target: Option<window_target::WindowTarget> = None;
+    let mut session_profile = app_styles.profile(None);
     let mut restart_requested = false;
     // Last injection context, kept so SnapshotCorrection can re-arm monitoring
     #[cfg(feature = "correction")]
@@ -1255,8 +1271,15 @@ pub async fn run() -> Result<()> {
                             info!("Received StartRecording command");
                             // Capture focused window before pausing media (to lock typing target)
                             window_target = window_target::WindowTarget::capture().await;
+                            session_profile =
+                                app_styles.profile(window_target.as_ref().map(|wt| wt.class()));
                             if let Some(ref wt) = window_target {
-                                info!("Captured window target: class={}", wt.class());
+                                info!(
+                                    "Captured window target: class={} category={:?} style={}",
+                                    wt.class(),
+                                    session_profile.category,
+                                    app_styles.preset(session_profile.category).name()
+                                );
                             }
                             media_was_playing = pause_media_if_playing();
 
@@ -1396,8 +1419,11 @@ pub async fn run() -> Result<()> {
                             // Subscribe before spawning so no early partials are missed.
                             let mut event_rx = session_engine.subscribe();
                             let gui_control_tx_preview = gui_control_tx.clone();
-                            let preview_stages =
-                                config.session_stages(&model_spec, session_engine.as_ref());
+                            let preview_stages = config.app_session_stages(
+                                &model_spec,
+                                session_engine.as_ref(),
+                                &session_profile.style,
+                            );
                             let preview_ctx = StageContext {
                                 user_dict: Some(Arc::clone(&user_dict)),
                                 word_sub: word_sub.clone(),
@@ -1732,14 +1758,22 @@ pub async fn run() -> Result<()> {
                     info!("Transcription: '{}'", preview_text);
 
                     // Apply post-processing pipeline
-                    let final_stages = config.session_stages(&model_spec, session_engine.as_ref());
+                    let final_stages = config.app_session_stages(
+                        &model_spec,
+                        session_engine.as_ref(),
+                        &session_profile.style,
+                    );
                     let final_ctx = StageContext {
                         user_dict: Some(Arc::clone(&user_dict)),
                         word_sub: word_sub.clone(),
                         llm: Some(config.llm_correction.clone()),
                     };
-                    let pipeline =
+                    let mut pipeline =
                         Pipeline::from_stages(&final_stages, &final_ctx, PipelinePass::Final);
+                    // Style rules run last so grammar cannot re-add what they remove.
+                    if let Some(style_processor) = session_profile.style.processor() {
+                        pipeline.add_processor(style_processor);
+                    }
                     let processed_result = pipeline.process(&preview_text)?;
 
                     if !pipeline.is_empty() && preview_text != processed_result {
@@ -1769,13 +1803,8 @@ pub async fn run() -> Result<()> {
                         }
                     }
 
-                    // Build per-app profile from captured window class
-                    let profile = match &window_target {
-                        Some(wt) => app_profile::AppProfile::from_window_class(wt.class()),
-                        None => app_profile::AppProfile::for_category(
-                            window_detect::AppCategory::General,
-                        ),
-                    };
+                    // Per-app profile resolved from the window class captured at start
+                    let profile = &session_profile;
 
                     let sanitizer =
                         SanitizationProcessor::new(profile.sanitization.clone(), profile.category);
@@ -2112,7 +2141,7 @@ mod config_tests {
             .iter()
             .map(|s| s["id"].as_str().unwrap())
             .collect();
-        for section in ["daemon", "pipeline", "openai", "llm_correction"] {
+        for section in ["daemon", "pipeline", "openai", "llm_correction", "app_styles"] {
             assert!(ids.contains(&section), "schema is missing section [{section}]");
         }
     }
