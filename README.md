@@ -135,8 +135,7 @@ make uninstall
 > The packaged installs above are immune to this: they own the single copy in
 > `/usr/bin`. Don't mix a dev install with a packaged one.
 
-Cargo features `pipewire`, `tray` and `correction` are on by default. Build with
-`--no-default-features` to drop the PipeWire backend, the tray, or AT-SPI2 correction learning.
+Cargo features `pipewire`, `tray` and `correction` (AT-SPI2 correction learning) are on by default.
 
 ## Download the Model
 
@@ -302,9 +301,15 @@ realtime engine transcribes the recorded audio once with `gpt-transcribe`, so th
 not lost. The OpenAI engines send your user-dictionary words as keyword hints. The `[openai]`
 section sets the prompt, extra keywords, languages and the realtime delay.
 
-The daemon reads `OPENAI_API_KEY` from its own environment. Under systemd, set it in a drop-in
-(`systemctl --user edit voice-dictation`, then `Environment=OPENAI_API_KEY=...`). Without the
-key the OpenAI engine cannot be built.
+The daemon reads `OPENAI_API_KEY` from its own environment, not your shell's. Under systemd, add
+it with `systemctl --user edit voice-dictation`:
+
+```ini
+[Service]
+Environment=OPENAI_API_KEY=sk-...
+```
+
+Without the key the OpenAI engine cannot be built.
 
 ### Post-processing stages
 
