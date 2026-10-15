@@ -2143,7 +2143,12 @@ async fn retranscribe_latest(model: Option<&str>, ctx: &mut RetryContext<'_>) ->
         Arc::clone(ctx.preview_engine.as_ref().expect("engine was just created"))
     } else {
         info!("Loading {} for retry...", spec);
-        spec.create_streaming_engine(wav_rate, &options)?
+        // Model loading is blocking work (ONNX session setup); keep it off
+        // the runtime threads.
+        let one_off = spec.clone();
+        tokio::task::spawn_blocking(move || one_off.create_streaming_engine(wav_rate, &options))
+            .await
+            .map_err(|e| anyhow::anyhow!("engine load task failed: {e}"))??
     };
 
     engine.reset();

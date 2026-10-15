@@ -103,9 +103,17 @@ pub(crate) fn save_recording<M: Serialize>(
     }
     writer.finalize()?;
 
-    // Write metadata JSON
-    let json_content = serde_json::to_string_pretty(metadata)?;
-    create_private_file(&json_path)?.write_all(json_content.as_bytes())?;
+    // Write metadata JSON. A WAV without metadata is invisible to readers
+    // that pair them (retry would silently fall back to an older utterance),
+    // so drop both if it fails.
+    let json_result = serde_json::to_string_pretty(metadata)
+        .map_err(anyhow::Error::from)
+        .and_then(|json| Ok(create_private_file(&json_path)?.write_all(json.as_bytes())?));
+    if let Err(e) = json_result {
+        let _ = fs::remove_file(&wav_path);
+        let _ = fs::remove_file(&json_path);
+        return Err(e);
+    }
 
     Ok(wav_path)
 }
@@ -122,6 +130,22 @@ pub(crate) fn create_private_file(path: &Path) -> Result<File> {
     Ok(OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?)
 }
 
+/// Delete `recording_*.json` files whose WAV is gone.
+fn remove_orphan_metadata(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+        let is_json = path.extension().map(|ext| ext == "json").unwrap_or(false);
+        if is_json && !path.with_extension("wav").exists() {
+            match fs::remove_file(&path) {
+                Ok(()) => debug!("Removed orphan recording metadata: {}", path.display()),
+                Err(e) => warn!("Failed to remove orphan metadata {}: {}", path.display(), e),
+            }
+        }
+    }
+}
+
 /// WAV recordings in `dir`, oldest first (by timestamped file name).
 pub(crate) fn list_recordings(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -136,8 +160,12 @@ pub(crate) fn list_recordings(dir: &Path) -> Vec<PathBuf> {
     wavs
 }
 
-/// Remove old recordings, keeping only the most recent `keep` WAV/JSON pairs
+/// Remove old recordings, keeping only the most recent `keep` WAV/JSON pairs.
+/// Metadata JSON with no matching WAV is removed too: it holds transcript
+/// text, and nothing would ever prune it otherwise.
 pub(crate) fn prune_recordings(dir: &Path, keep: usize) -> Result<()> {
+    remove_orphan_metadata(dir);
+
     let wav_files = list_recordings(dir);
 
     if wav_files.len() <= keep {

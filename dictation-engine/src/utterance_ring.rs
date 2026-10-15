@@ -183,6 +183,41 @@ mod tests {
     }
 
     #[test]
+    fn prune_removes_orphan_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("recent");
+        let ring = UtteranceRing::with_dir(dir.clone(), 5);
+        let kept = ring.push(&[1], &meta("Kept.", 0)).unwrap().unwrap();
+        // Metadata whose WAV is gone (e.g. deleted by hand or a crash).
+        let orphan = dir.join("recording_20000101_000000.000.json");
+        fs::write(&orphan, "{\"final_text\": \"secret\"}").unwrap();
+
+        ring.prune().unwrap();
+        assert!(!orphan.exists());
+        assert!(kept.exists() && kept.with_extension("json").exists());
+
+        // Size 0 at startup must leave no transcript text behind either.
+        fs::write(&orphan, "{}").unwrap();
+        UtteranceRing::with_dir(dir.clone(), 0).prune().unwrap();
+        assert!(fs::read_dir(&dir).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn failed_metadata_write_leaves_no_wav() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("recent");
+        let m = meta("Hello.", 0);
+        // Occupy the JSON path with a directory so the metadata write fails.
+        let base = format!("recording_{}", m.timestamp.format("%Y%m%d_%H%M%S%.3f"));
+        fs::create_dir_all(dir.join(format!("{base}.json"))).unwrap();
+
+        let ring = UtteranceRing::with_dir(dir.clone(), 5);
+        assert!(ring.push(&[1, 2, 3], &m).is_err());
+        assert!(!dir.join(format!("{base}.wav")).exists());
+        assert!(ring.latest().is_none());
+    }
+
+    #[test]
     fn storage_is_user_only() {
         let tmp = tempfile::tempdir().unwrap();
         let ring = UtteranceRing::with_dir(tmp.path().join("recent"), 5);
