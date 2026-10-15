@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 use tracing::info;
 use zbus::interface;
 
@@ -45,6 +45,35 @@ pub enum DaemonCommand {
     SwitchDevice(Option<String>),
     /// Re-arm correction monitoring against the last injection (captures late edits).
     SnapshotCorrection,
+    /// Re-type the last utterance into the focused window, optionally
+    /// re-transcribing its stored audio first (with `model` overriding the
+    /// configured engine). The daemon answers on `reply` with the typed text.
+    Retry {
+        retranscribe: bool,
+        model: Option<String>,
+        reply: RetryReply,
+    },
+}
+
+/// One-shot reply slot for [`DaemonCommand::Retry`]. Dropping it unanswered
+/// (e.g. the daemon was busy) fails the D-Bus call.
+#[derive(Debug, Clone)]
+pub struct RetryReply(Arc<std::sync::Mutex<Option<oneshot::Sender<RetryResult>>>>);
+
+/// Typed text on success, an error message for the CLI otherwise.
+pub type RetryResult = Result<String, String>;
+
+impl RetryReply {
+    pub fn new() -> (Self, oneshot::Receiver<RetryResult>) {
+        let (tx, rx) = oneshot::channel();
+        (Self(Arc::new(std::sync::Mutex::new(Some(tx)))), rx)
+    }
+
+    pub fn send(&self, result: RetryResult) {
+        if let Some(tx) = self.0.lock().ok().and_then(|mut slot| slot.take()) {
+            let _ = tx.send(result);
+        }
+    }
 }
 
 /// Response from status query
@@ -136,6 +165,29 @@ impl VoiceDictationService {
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to send command: {}", e)))?;
         Ok(())
+    }
+
+    /// Re-type the last utterance into the focused window. With
+    /// `retranscribe`, re-run its stored audio first; a non-empty `model`
+    /// overrides the configured engine. Returns the typed text.
+    async fn retry(&self, retranscribe: bool, model: String) -> zbus::fdo::Result<String> {
+        info!("D-Bus: Retry called (retranscribe={}, model={:?})", retranscribe, model);
+        let model = (!model.is_empty()).then_some(model);
+        let (reply, rx) = RetryReply::new();
+        {
+            let sender = self.command_sender.lock().await;
+            sender
+                .send(DaemonCommand::Retry { retranscribe, model, reply })
+                .await
+                .map_err(|e| zbus::fdo::Error::Failed(format!("Failed to send command: {}", e)))?;
+        }
+        match rx.await {
+            Ok(Ok(text)) => Ok(text),
+            Ok(Err(e)) => Err(zbus::fdo::Error::Failed(e)),
+            Err(_) => Err(zbus::fdo::Error::Failed(
+                "Daemon is busy (recording or processing); retry when idle".to_string(),
+            )),
+        }
     }
 
     /// Shutdown the daemon gracefully

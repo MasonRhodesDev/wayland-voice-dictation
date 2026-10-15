@@ -40,6 +40,22 @@ enum Commands {
     Toggle,
     #[command(about = "Show current status")]
     Status,
+    #[command(
+        about = "Re-type the last dictation into the focused window",
+        long_about = "Re-type the last dictation's final text into the currently focused window.\n\n\
+                      With --retranscribe, re-run the last utterance's stored audio first\n\
+                      (optionally through a different engine with --model). The daemon keeps the\n\
+                      last `recent_utterances` utterances (default 5) under\n\
+                      $XDG_STATE_HOME/voice-dictation/recent; 0 disables it."
+    )]
+    Retry {
+        /// Re-transcribe the stored audio instead of re-typing the old text
+        #[arg(long)]
+        retranscribe: bool,
+        /// Model spec for re-transcription, e.g. parakeet:default or openai:gpt-live-transcribe
+        #[arg(long, requires = "retranscribe")]
+        model: Option<String>,
+    },
     #[command(about = "Open configuration TUI")]
     Config,
     #[command(about = "List available models")]
@@ -445,6 +461,41 @@ fn toggle_recording() -> Result<(), Box<dyn std::error::Error>> {
             Err("Unknown state".into())
         }
     }
+}
+
+async fn call_retry(
+    retranscribe: bool,
+    model: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let connection = Connection::session().await?;
+    let proxy =
+        zbus::Proxy::new(&connection, DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE_NAME)
+            .await?;
+
+    let typed: String = proxy.call("Retry", &(retranscribe, model.unwrap_or_default())).await?;
+    Ok(typed)
+}
+
+fn retry(retranscribe: bool, model: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if !is_daemon_running() {
+        eprintln!("Error: Daemon not running");
+        eprintln!("Start the daemon with: systemctl --user start voice-dictation");
+        return Err("Daemon not running".into());
+    }
+
+    let state = get_state()?;
+    if state != "idle" {
+        eprintln!("Daemon is busy (current: {}); retry when idle", state);
+        return Err("Invalid state".into());
+    }
+
+    if retranscribe {
+        println!("Re-transcribing the last utterance...");
+    }
+    let typed = tokio::runtime::Runtime::new()?.block_on(call_retry(retranscribe, model))?;
+    println!("Typed: {}", typed);
+
+    Ok(())
 }
 
 fn show_status() {
@@ -1250,6 +1301,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Status => {
             show_status();
+        }
+        Commands::Retry { retranscribe, model } => {
+            check_runtime_dependencies(true, false)?;
+            retry(retranscribe, model)?;
         }
         Commands::Config => {
             open_config()?;
