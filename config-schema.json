@@ -104,6 +104,14 @@
           "ui_widget": "number_input"
         },
         {
+          "id": "incremental_finalize",
+          "label": "Incremental Finalization",
+          "description": "Split the recording at pauses the VAD hears and transcribe each finished segment while you are still speaking (local models), so confirming only has the last segment left to transcribe. Off transcribes the whole recording after confirm.",
+          "type": "boolean",
+          "default": true,
+          "ui_widget": "toggle"
+        },
+        {
           "id": "silence_threshold_db",
           "label": "Fallback VAD Threshold (dB)",
           "description": "Level in dBFS above which the fallback VAD counts a chunk as speech. Used when Silero is off or cannot load.",

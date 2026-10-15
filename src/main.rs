@@ -1324,6 +1324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ))?;
             println!("model:      {}", r.model);
             println!("stages:     {}", r.stages);
+            println!("vad:        {}", r.vad);
             println!("audio:      {:.1} s", r.audio_secs);
             match r.first_partial_ms {
                 Some(ms) => println!("partials:   {} (first after {} ms)", r.partials, ms),

@@ -209,7 +209,7 @@ impl ModelSpec {
             }
             Provider::Parakeet => {
                 let model = self.build_local_model(sample_rate)?;
-                Ok(Arc::new(LocalEngineDriver::new(model)))
+                Ok(Arc::new(LocalEngineDriver::new(model, sample_rate)))
             }
         }
     }

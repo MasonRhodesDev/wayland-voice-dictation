@@ -180,6 +180,11 @@ struct DaemonConfig {
     // Silero speech probability threshold (0.0-1.0)
     #[serde(default = "default_vad_threshold")]
     vad_threshold: f32,
+    // Split the recording at the VAD's pauses and transcribe each closed
+    // segment once while recording (local models), so confirm only has the
+    // last segment left to transcribe.
+    #[serde(default = "default_incremental_finalize")]
+    incremental_finalize: bool,
 
     #[serde(default = "default_debug_audio")]
     debug_audio: bool,
@@ -255,6 +260,9 @@ fn default_vad_enabled() -> bool {
 }
 fn default_vad_threshold() -> f32 {
     0.5
+}
+fn default_incremental_finalize() -> bool {
+    true
 }
 fn default_debug_audio() -> bool {
     false
@@ -817,6 +825,7 @@ pub async fn run() -> Result<()> {
                 silence_threshold_db: default_silence_threshold_db(),
                 vad_enabled: default_vad_enabled(),
                 vad_threshold: default_vad_threshold(),
+                incremental_finalize: default_incremental_finalize(),
                 debug_audio: default_debug_audio(),
                 trailing_buffer_ms: default_trailing_buffer_ms(),
                 audio_backend: default_audio_backend(),
@@ -1366,6 +1375,7 @@ pub async fn run() -> Result<()> {
                             let health_clone = Arc::clone(&health_state);
                             let audio_notify_tx = Arc::clone(&audio_notify);
                             let vad_clone = Arc::clone(&vad);
+                            let incremental_finalize = config.daemon.incremental_finalize;
                             let vad_name = {
                                 let mut v = vad.lock().unwrap_or_else(|e| e.into_inner());
                                 v.reset();
@@ -1418,17 +1428,20 @@ pub async fn run() -> Result<()> {
                                                         let _ = spectrum_tx_clone.send(chunk);
                                                     }
 
-                                                    let is_speech = vad_clone
+                                                    let verdict = vad_clone
                                                         .lock()
                                                         .unwrap_or_else(|e| e.into_inner())
                                                         .process(&samples)
-                                                        .unwrap_or_else(|e| {
-                                                            debug!("VAD error: {}", e);
-                                                            false
-                                                        });
-                                                    speech.observe(samples.len(), is_speech);
+                                                        .map_err(|e| debug!("VAD error: {}", e))
+                                                        .ok();
+                                                    speech.observe(samples.len(), verdict == Some(true));
 
-                                                    if let Err(e) = engine_clone.process_audio(&samples) {
+                                                    let fed = if incremental_finalize {
+                                                        engine_clone.process_audio_with_vad(&samples, verdict)
+                                                    } else {
+                                                        engine_clone.process_audio(&samples)
+                                                    };
+                                                    if let Err(e) = fed {
                                                         error!("Processing error: {}", e);
                                                     }
                                                     audio_notify_tx.notify_one();
@@ -1971,6 +1984,8 @@ pub async fn run() -> Result<()> {
 pub struct FileTranscription {
     pub model: String,
     pub stages: String,
+    /// VAD that segmented the audio, or "off" without incremental finalization.
+    pub vad: String,
     pub raw: String,
     pub processed: String,
     pub partials: usize,
@@ -2022,13 +2037,34 @@ pub async fn transcribe_file(
         None => config.session_stages(&spec, engine.as_ref()),
     };
 
+    // Same VAD as the daemon, so segments close at the same pauses. Built off
+    // the runtime: the first run downloads the Silero model.
+    let mut vad = if config.daemon.incremental_finalize {
+        let d = &config.daemon;
+        let (enabled, threshold, threshold_db) =
+            (d.vad_enabled, d.vad_threshold, d.silence_threshold_db);
+        Some(
+            tokio::task::spawn_blocking(move || {
+                vad::create_vad(enabled, threshold, threshold_db, 16_000)
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let vad_name = vad.as_ref().map_or("off", |v| v.name()).to_string();
+
     engine.reset();
     let mut rx = engine.subscribe();
     let started = Instant::now();
     let mut partials = 0usize;
     let mut first_partial_ms = None;
     for chunk in samples.chunks(1_600) {
-        engine.process_audio(chunk)?;
+        match vad.as_mut() {
+            Some(vad) => engine.process_audio_with_vad(chunk, vad.process(chunk).ok())?,
+            None => engine.process_audio(chunk)?,
+        }
         if paced {
             let tick = tokio::time::sleep(Duration::from_millis(100));
             tokio::pin!(tick);
@@ -2070,6 +2106,7 @@ pub async fn transcribe_file(
     Ok(FileTranscription {
         model: spec.to_string(),
         stages: describe_stages(&stages),
+        vad: vad_name,
         raw,
         processed,
         partials,
