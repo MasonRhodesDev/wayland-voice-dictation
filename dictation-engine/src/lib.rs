@@ -2037,12 +2037,12 @@ async fn retry_last_utterance(
     req: RetryRequest<'_>,
     ctx: &mut RetryContext<'_>,
 ) -> Result<RetryOutcome> {
-    // Armed once the overlay is shown, so expected early errors ("nothing
-    // to retry") don't touch the GUI.
-    let mut guard = req.retranscribe.then(|| ProcessingGuard::new(ctx.gui_control_tx.clone()));
+    // Armed only once the overlay is shown, so expected early errors
+    // ("nothing to retry", a bad --model) don't touch the GUI.
+    let mut guard: Option<ProcessingGuard> = None;
 
     let text = if req.retranscribe {
-        retranscribe_latest(req.model, ctx).await?
+        retranscribe_latest(req.model, ctx, &mut guard).await?
     } else {
         ctx.last_final_text
             .clone()
@@ -2102,7 +2102,11 @@ async fn retry_last_utterance(
 /// Re-run the newest stored utterance through `model` (or the configured
 /// model) and the final post-processing pass. Stores the new text back in the
 /// ring and returns it.
-async fn retranscribe_latest(model: Option<&str>, ctx: &mut RetryContext<'_>) -> Result<String> {
+async fn retranscribe_latest(
+    model: Option<&str>,
+    ctx: &mut RetryContext<'_>,
+    guard: &mut Option<ProcessingGuard>,
+) -> Result<String> {
     let mut utterance = ctx.ring.latest().ok_or_else(|| {
         if ctx.ring.is_enabled() {
             anyhow::anyhow!("No stored utterance audio to re-transcribe yet")
@@ -2130,6 +2134,7 @@ async fn retranscribe_latest(model: Option<&str>, ctx: &mut RetryContext<'_>) ->
         }
     }
 
+    *guard = Some(ProcessingGuard::new(ctx.gui_control_tx.clone()));
     let _ = ctx.gui_control_tx.send(GuiControl::SetTranscribing);
 
     // Reuse the daemon's engine for the configured model rather than loading
