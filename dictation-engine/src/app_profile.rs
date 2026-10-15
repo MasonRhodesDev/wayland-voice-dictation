@@ -261,7 +261,7 @@ fn parse_overrides(raw: &str) -> Vec<(String, AppCategory)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::post_processing::{StageSwitches, TextProcessor};
+    use crate::post_processing::StageSwitches;
 
     fn profile_for(class: &str) -> AppProfile {
         AppStyles::default().profile(Some(class))
