@@ -96,6 +96,16 @@
           "ui_widget": "number_input"
         },
         {
+          "id": "recent_utterances",
+          "label": "Recent Utterances Kept",
+          "description": "Number of recent utterances (audio + final text) kept for 'voice-dictation retry', stored with user-only permissions under $XDG_STATE_HOME/voice-dictation/recent. 0 disables it and writes no audio to disk",
+          "type": "number",
+          "default": 5,
+          "min": 0,
+          "max": 50,
+          "ui_widget": "number_input"
+        },
+        {
           "id": "media_resume_delay_ms",
           "label": "Media Resume Delay",
           "description": "Delay in milliseconds before resuming paused media after recording stops",

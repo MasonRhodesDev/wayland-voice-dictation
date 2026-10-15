@@ -169,6 +169,8 @@ Commands:
   confirm             Finalize and type the transcription
   toggle              Start if idle, confirm if recording
   status              Show daemon and subsystem status
+  retry               Re-type the last dictation into the focused window
+                      (--retranscribe [--model SPEC] re-runs its stored audio)
   config              Open the configuration TUI
   download-model      Download Parakeet model from HuggingFace
   list-audio-devices  List available audio input devices
@@ -177,6 +179,18 @@ Commands:
   debug list          List saved debug recordings
   debug play FILE     Play a debug recording
 ```
+
+### Retry
+
+If text lands in the wrong window or the transcript is bad, focus the right window and run
+`voice-dictation retry` (bind it to a key next to your dictation bind). It re-types the last
+dictation's text. `retry --retranscribe` re-runs the stored audio first, and
+`--model SPEC` re-runs it through a different engine (e.g. `openai:gpt-live-transcribe`).
+
+The daemon keeps the last `recent_utterances` utterances (default 5) as WAV + JSON under
+`$XDG_STATE_HOME/voice-dictation/recent` (`~/.local/state/...`), readable only by you.
+Set `recent_utterances = 0` under `[daemon]` to keep no audio on disk; plain `retry` still
+re-types the last text from memory until the daemon restarts.
 
 ## Configuration
 

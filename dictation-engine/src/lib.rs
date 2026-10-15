@@ -32,6 +32,7 @@ pub mod stream_engine;
 #[cfg(feature = "tray")]
 mod tray;
 pub mod user_dictionary;
+pub mod utterance_ring;
 pub mod vad;
 mod window_detect;
 mod window_target;
@@ -216,6 +217,11 @@ struct DaemonConfig {
     // injection target is wezterm, which AT-SPI2 cannot see.
     #[serde(default = "default_correction_backend_wezterm")]
     correction_backend_wezterm: bool,
+
+    // Recent utterances (audio + final text) kept for `voice-dictation retry`.
+    // 0 disables the ring and writes no audio to disk.
+    #[serde(default = "default_recent_utterances")]
+    recent_utterances: usize,
 }
 
 fn default_model() -> String {
@@ -274,6 +280,9 @@ fn default_enable_accessibility_bridge() -> bool {
 }
 fn default_correction_backend_wezterm() -> bool {
     true
+}
+fn default_recent_utterances() -> usize {
+    utterance_ring::DEFAULT_SIZE
 }
 
 /// Convert decibels to linear amplitude (RMS threshold).
@@ -815,6 +824,7 @@ pub async fn run() -> Result<()> {
                 correction_max_age_days: default_correction_max_age_days(),
                 enable_accessibility_bridge: default_enable_accessibility_bridge(),
                 correction_backend_wezterm: default_correction_backend_wezterm(),
+                recent_utterances: default_recent_utterances(),
             },
             pipeline: PipelineConfig::default(),
             openai: OpenAiConfig::default(),
@@ -1082,6 +1092,22 @@ pub async fn run() -> Result<()> {
     info!("Audio streams pre-loaded and ready (fast startup enabled)");
 
     let keyboard = Arc::new(KeyboardInjector::new());
+
+    // Always-on ring of recent utterances for `retry`. Trimming at startup
+    // also clears leftovers when the size was lowered (or set to 0).
+    let utterance_ring = utterance_ring::UtteranceRing::new(config.daemon.recent_utterances);
+    if let Err(e) = utterance_ring.prune() {
+        warn!("Failed to trim recent utterances in {}: {}", utterance_ring.dir().display(), e);
+    }
+    if utterance_ring.is_enabled() {
+        info!(
+            "Keeping the last {} utterances in {}",
+            config.daemon.recent_utterances,
+            utterance_ring.dir().display()
+        );
+    }
+    // Final text of the last utterance, so `retry` works with the ring disabled.
+    let mut last_final_text: Option<String> = None;
 
     // Spawn integrated GUI
     info!("Spawning integrated GUI...");
@@ -1543,6 +1569,55 @@ pub async fn run() -> Result<()> {
                                 }
                             }
                         }
+                        DaemonCommand::Retry { retranscribe, model, reply } => {
+                            info!(
+                                "Received Retry command (retranscribe={}, model={:?})",
+                                retranscribe, model
+                            );
+                            let _ = state_tx.send(DaemonState::Processing);
+                            let result = retry_last_utterance(
+                                RetryRequest { retranscribe, model: model.as_deref() },
+                                &mut RetryContext {
+                                    ring: &utterance_ring,
+                                    last_final_text: &mut last_final_text,
+                                    config: &config,
+                                    model_spec: &model_spec,
+                                    sample_rate,
+                                    preview_engine: &mut preview_engine,
+                                    user_dict: &user_dict,
+                                    word_sub: &word_sub,
+                                    keyboard: &keyboard,
+                                    gui_control_tx: &gui_control_tx,
+                                },
+                            )
+                            .await;
+                            if retranscribe && preview_engine.is_some() {
+                                health_state.engine_healthy.store(true, Ordering::Relaxed);
+                                engine_stopped_at = Some(Instant::now());
+                            }
+                            let _ = state_tx.send(daemon_state);
+                            match result {
+                                Ok(outcome) => {
+                                    info!("Retry typed {} chars", outcome.typed.len());
+                                    #[cfg(feature = "correction")]
+                                    {
+                                        last_injection =
+                                            Some(correction_engine::InjectionContext {
+                                                text: outcome.typed.clone(),
+                                                timestamp: chrono::Utc::now(),
+                                                instant: Instant::now(),
+                                                window_class: outcome.window_class.clone(),
+                                                window_title: String::new(),
+                                            });
+                                    }
+                                    reply.send(Ok(outcome.typed));
+                                }
+                                Err(e) => {
+                                    warn!("Retry failed: {:#}", e);
+                                    reply.send(Err(format!("{:#}", e)));
+                                }
+                            }
+                        }
                         _ => {
                             warn!("Ignoring unexpected command in Idle state");
                         }
@@ -1769,6 +1844,24 @@ pub async fn run() -> Result<()> {
                         }
                     }
 
+                    // Keep the utterance for `retry` before anything below can
+                    // fail: a failed injection is exactly what retry is for.
+                    if utterance_ring.is_enabled() {
+                        let audio_buffer = session_engine.get_audio_buffer();
+                        let metadata = utterance_ring::UtteranceMetadata {
+                            timestamp: chrono::Utc::now(),
+                            duration_ms: (audio_buffer.len() as u64 * 1000) / sample_rate as u64,
+                            sample_rate,
+                            model: model_spec.to_string(),
+                            raw_text: preview_text.clone(),
+                            final_text: processed_result.clone(),
+                        };
+                        if let Err(e) = utterance_ring.push(&audio_buffer, &metadata) {
+                            warn!("Failed to store utterance for retry: {}", e);
+                        }
+                    }
+                    last_final_text = Some(processed_result.clone());
+
                     // Build per-app profile from captured window class
                     let profile = match &window_target {
                         Some(wt) => app_profile::AppProfile::from_window_class(wt.class()),
@@ -1907,6 +2000,186 @@ pub async fn run() -> Result<()> {
         std::process::exit(64);
     }
     Ok(())
+}
+
+/// What `voice-dictation retry` asked for.
+struct RetryRequest<'a> {
+    retranscribe: bool,
+    /// Model spec overriding the configured one for re-transcription.
+    model: Option<&'a str>,
+}
+
+/// Daemon state a retry reads and updates.
+struct RetryContext<'a> {
+    ring: &'a utterance_ring::UtteranceRing,
+    last_final_text: &'a mut Option<String>,
+    config: &'a Config,
+    model_spec: &'a ModelSpec,
+    sample_rate: u32,
+    preview_engine: &'a mut Option<Arc<dyn StreamingEngine>>,
+    user_dict: &'a Arc<UserDictionary>,
+    word_sub: &'a Option<WordSubstitutionProcessor>,
+    keyboard: &'a KeyboardInjector,
+    gui_control_tx: &'a broadcast::Sender<GuiControl>,
+}
+
+/// What a retry typed, and where.
+struct RetryOutcome {
+    typed: String,
+    #[cfg_attr(not(feature = "correction"), allow(dead_code))]
+    window_class: String,
+}
+
+/// Re-type the last utterance into the focused window, re-transcribing its
+/// stored audio first when asked. Unlike a dictation, there is no captured
+/// target to refocus: the text goes wherever focus is now.
+async fn retry_last_utterance(
+    req: RetryRequest<'_>,
+    ctx: &mut RetryContext<'_>,
+) -> Result<RetryOutcome> {
+    // Armed once the overlay is shown, so expected early errors ("nothing
+    // to retry") don't touch the GUI.
+    let mut guard = req.retranscribe.then(|| ProcessingGuard::new(ctx.gui_control_tx.clone()));
+
+    let text = if req.retranscribe {
+        retranscribe_latest(req.model, ctx).await?
+    } else {
+        ctx.last_final_text
+            .clone()
+            .or_else(|| ctx.ring.latest().map(|u| u.metadata.final_text))
+            .ok_or_else(|| anyhow::anyhow!("Nothing to retry: no dictation recorded yet"))?
+    };
+    if text.trim().is_empty() {
+        anyhow::bail!(
+            "The last utterance has no text to type{}",
+            if req.retranscribe { "" } else { " (try --retranscribe)" }
+        );
+    }
+    *ctx.last_final_text = Some(text.clone());
+
+    let window = window_target::WindowTarget::capture().await;
+    let window_class = window.as_ref().map(|w| w.class().to_string()).unwrap_or_default();
+    let profile = match &window {
+        Some(wt) => app_profile::AppProfile::from_window_class(wt.class()),
+        None => app_profile::AppProfile::for_category(window_detect::AppCategory::General),
+    };
+    let typed = SanitizationProcessor::new(profile.sanitization.clone(), profile.category)
+        .process(&text)?;
+
+    // Clipboard backup, as for a dictation.
+    if let Err(e) = tokio::process::Command::new("wl-copy")
+        .arg(&typed)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        warn!("Failed to run wl-copy: {}", e);
+    }
+
+    let guard = guard.get_or_insert_with(|| ProcessingGuard::new(ctx.gui_control_tx.clone()));
+    info!("Retry: typing into {:?} ({:?} mode)", window_class, profile.category);
+    let typing_tx = ctx.gui_control_tx.clone();
+    let mut last_sent = 0usize;
+    ctx.keyboard
+        .type_text_with_progress(&typed, profile.word_delay_ms, move |done, total| {
+            let step = (total / 50).max(1);
+            if done == 0 || done == total || done - last_sent >= step {
+                last_sent = done;
+                let _ = typing_tx.send(GuiControl::SetTyping { done, total });
+            }
+        })
+        .await?;
+
+    let _ = ctx.gui_control_tx.send(GuiControl::SetClosing);
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let _ = ctx.gui_control_tx.send(GuiControl::SetHidden);
+    guard.disarm();
+
+    Ok(RetryOutcome { typed, window_class })
+}
+
+/// Re-run the newest stored utterance through `model` (or the configured
+/// model) and the final post-processing pass. Stores the new text back in the
+/// ring and returns it.
+async fn retranscribe_latest(model: Option<&str>, ctx: &mut RetryContext<'_>) -> Result<String> {
+    let mut utterance = ctx.ring.latest().ok_or_else(|| {
+        if ctx.ring.is_enabled() {
+            anyhow::anyhow!("No stored utterance audio to re-transcribe yet")
+        } else {
+            anyhow::anyhow!("No audio is stored: recent_utterances is 0")
+        }
+    })?;
+    let (samples, wav_rate) = utterance.read_audio()?;
+    if samples.is_empty() {
+        anyhow::bail!("Stored audio {} is empty", utterance.wav_path.display());
+    }
+
+    let spec = match model {
+        Some(m) => ModelSpec::parse(m).map_err(|e| anyhow::anyhow!("Invalid model '{m}': {e}"))?,
+        None => ctx.model_spec.clone(),
+    };
+    if !spec.is_available() {
+        match spec.provider {
+            Provider::OpenAi => {
+                anyhow::bail!("Model '{}' needs OPENAI_API_KEY in the daemon's environment", spec)
+            }
+            Provider::Parakeet => {
+                anyhow::bail!("Model '{}' not found at {:?}", spec, spec.model_path())
+            }
+        }
+    }
+
+    let _ = ctx.gui_control_tx.send(GuiControl::SetTranscribing);
+
+    // Reuse the daemon's engine for the configured model rather than loading
+    // a second copy; a different model gets a one-off engine.
+    let options = ctx.config.engine_options(ctx.user_dict);
+    let engine = if spec.to_string() == ctx.model_spec.to_string() && wav_rate == ctx.sample_rate {
+        if ctx.preview_engine.is_none() {
+            info!("Recreating transcription engine for retry...");
+            *ctx.preview_engine = Some(ctx.model_spec.create_streaming_engine(wav_rate, &options)?);
+        }
+        Arc::clone(ctx.preview_engine.as_ref().expect("engine was just created"))
+    } else {
+        info!("Loading {} for retry...", spec);
+        spec.create_streaming_engine(wav_rate, &options)?
+    };
+
+    engine.reset();
+    let mut rx = engine.subscribe();
+    for chunk in samples.chunks(1_600) {
+        engine.process_audio(chunk)?;
+    }
+    engine.finish();
+    let raw = loop {
+        match tokio::time::timeout(Duration::from_secs(120), rx.recv()).await {
+            Ok(Some(TranscriptEvent::Final(t))) => break t,
+            Ok(Some(TranscriptEvent::Partial(_))) => continue,
+            Ok(Some(TranscriptEvent::Error(e))) => anyhow::bail!("engine error: {e}"),
+            Ok(None) => anyhow::bail!("engine event stream closed before the final transcript"),
+            Err(_) => anyhow::bail!("timed out waiting for the final transcript"),
+        }
+    };
+    engine.reset();
+
+    let stage_ctx = StageContext {
+        user_dict: Some(Arc::clone(ctx.user_dict)),
+        word_sub: ctx.word_sub.clone(),
+        llm: Some(ctx.config.llm_correction.clone()),
+    };
+    let stages = ctx.config.session_stages(&spec, engine.as_ref());
+    let processed =
+        Pipeline::from_stages(&stages, &stage_ctx, PipelinePass::Final).process(&raw)?;
+    info!("Retry: re-transcribed with {}: '{}'", spec, processed);
+
+    utterance.metadata.model = spec.to_string();
+    utterance.metadata.raw_text = raw;
+    utterance.metadata.final_text = processed.clone();
+    if let Err(e) = ctx.ring.update(&utterance) {
+        warn!("Failed to update stored utterance: {}", e);
+    }
+    Ok(processed)
 }
 
 /// Result of running one recording through an engine and its stage chain.
@@ -2100,6 +2373,15 @@ mod config_tests {
         assert_eq!(opts.languages, vec!["en"]);
     }
 
+    #[test]
+    fn recent_utterances_defaults_and_parses() {
+        let base = "[daemon]\naudio_device = \"default\"\nsample_rate = \"16000\"\n";
+        let cfg: Config = toml::from_str(base).unwrap();
+        assert_eq!(cfg.daemon.recent_utterances, utterance_ring::DEFAULT_SIZE);
+        let cfg: Config = toml::from_str(&format!("{base}recent_utterances = 0\n")).unwrap();
+        assert_eq!(cfg.daemon.recent_utterances, 0);
+    }
+
     /// The repository schema must keep parsing and must cover every config
     /// section the daemon reads, or a TUI save would drop that section.
     #[test]
@@ -2115,5 +2397,14 @@ mod config_tests {
         for section in ["daemon", "pipeline", "openai", "llm_correction"] {
             assert!(ids.contains(&section), "schema is missing section [{section}]");
         }
+        let daemon_fields: Vec<&str> =
+            schema["sections"].as_array().unwrap().iter().find(|s| s["id"] == "daemon").unwrap()
+                ["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f["id"].as_str().unwrap())
+                .collect();
+        assert!(daemon_fields.contains(&"recent_utterances"));
     }
 }
