@@ -93,7 +93,7 @@ impl Pipeline {
             grammar: enable_grammar,
         };
         let stages = stages::resolve_stages(LOCAL_MODEL_STAGES, None, switches);
-        let ctx = StageContext { user_dict, word_sub, llm: None };
+        let ctx = StageContext { user_dict, word_sub, ..StageContext::default() };
         Self::from_stages(&stages, &ctx, PipelinePass::Final)
     }
 

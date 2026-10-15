@@ -5,6 +5,7 @@ use harper_core::linting::{Lint, LintGroup, LintKind, Linter, Suggestion};
 use harper_core::parsers::PlainEnglish;
 use harper_core::spell::MutableDictionary;
 use harper_core::{Dialect, Document};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Grammar and spell checker using Harper.
@@ -23,19 +24,29 @@ use std::sync::Arc;
 pub struct GrammarProcessor {
     dictionary: Arc<MutableDictionary>,
     user_dict: Option<Arc<UserDictionary>>,
+    /// This session's context words (lowercased, with identifier parts).
+    /// Spelling lints on them are skipped, so a word the fuzzy vocabulary
+    /// stage just restored is not "corrected" back.
+    context_words: HashSet<String>,
 }
 
 impl GrammarProcessor {
     /// Create a new grammar processor with Harper's default configuration.
     pub fn new() -> Self {
         let dictionary = MutableDictionary::curated();
-        Self { dictionary, user_dict: None }
+        Self { dictionary, user_dict: None, context_words: HashSet::new() }
     }
 
     /// Create a new grammar processor with user dictionary integration.
     pub fn new_with_user_dictionary(user_dict: Arc<UserDictionary>) -> Self {
         let dictionary = MutableDictionary::curated();
-        Self { dictionary, user_dict: Some(user_dict) }
+        Self { dictionary, user_dict: Some(user_dict), context_words: HashSet::new() }
+    }
+
+    /// Also accept the spelling of these session context words.
+    pub fn with_context_words(mut self, context_words: HashSet<String>) -> Self {
+        self.context_words = context_words;
+        self
     }
 }
 
@@ -65,12 +76,15 @@ impl TextProcessor for GrammarProcessor {
         for lint in sorted_lints {
             // Skip spelling corrections for words in user dictionary
             if matches!(lint.lint_kind, LintKind::Spelling) {
+                let span = lint.span;
+                let word = &text[span.start..span.end];
                 if let Some(user_dict) = &self.user_dict {
-                    let span = lint.span;
-                    let word = &text[span.start..span.end];
                     if user_dict.contains(word) {
                         continue;
                     }
+                }
+                if self.context_words.contains(&word.to_lowercase()) {
+                    continue;
                 }
             }
 
@@ -162,6 +176,17 @@ mod tests {
         // Technical terms should be preserved
         assert!(result.contains("API"));
         assert!(result.contains("JSON"));
+    }
+
+    #[test]
+    fn context_words_are_not_spell_corrected() {
+        let words = crate::context_words::ContextWords::new(crate::context_words::extract(
+            &["hyprctl hotword_trie"],
+            10,
+        ));
+        let processor = GrammarProcessor::new().with_context_words(words.spelling_allowlist());
+        let input = "Open hyprctl and the hotword_trie module.";
+        assert_eq!(processor.process(input).unwrap(), input);
     }
 
     #[test]

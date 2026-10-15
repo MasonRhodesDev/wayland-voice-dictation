@@ -215,7 +215,10 @@ impl WeztermCli {
             .arg("--no-auto-start")
             .args(args)
             .env("WEZTERM_UNIX_SOCKET", &self.socket)
-            .stdin(std::process::Stdio::null());
+            .stdin(std::process::Stdio::null())
+            // A caller that gives up (timeout, dropped future) must not leave
+            // the child running.
+            .kill_on_drop(true);
 
         let output = tokio::time::timeout(CLI_TIMEOUT, cmd.output())
             .await

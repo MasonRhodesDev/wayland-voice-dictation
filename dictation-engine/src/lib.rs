@@ -12,6 +12,8 @@ use tracing::{debug, error, info, warn};
 mod app_profile;
 pub mod audio_backend;
 mod chunking;
+mod context_sources;
+mod context_words;
 pub mod control_ipc;
 pub mod ctc_direct_engine;
 pub mod ctc_engine;
@@ -78,6 +80,8 @@ struct RecordingSession {
     #[allow(dead_code)]
     start_time: Instant,
     engine: Arc<dyn StreamingEngine>,
+    /// Context biasing words for this session only (empty when disabled).
+    context_words: context_words::ContextWords,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,6 +171,13 @@ struct DaemonConfig {
     #[serde(default = "default_enable_fuzzy_vocab")]
     enable_fuzzy_vocab: bool,
 
+    // Context biasing: at recording start, read the focused field (AT-SPI),
+    // the wezterm pane and the window title, and bias this one utterance
+    // toward the distinctive words found there. Held in memory only. Off by
+    // default: it reads on-screen text and changes what fuzzy_vocab emits.
+    #[serde(default = "default_enable_context_biasing")]
+    enable_context_biasing: bool,
+
     // Audio capture
     #[serde(default = "default_silence_threshold_db")]
     silence_threshold_db: f32,
@@ -235,6 +246,9 @@ fn default_enable_fuzzy_vocab() -> bool {
 }
 fn default_enable_word_substitution() -> bool {
     true
+}
+fn default_enable_context_biasing() -> bool {
+    false
 }
 fn default_silence_threshold_db() -> f32 {
     -60.0
@@ -802,6 +816,7 @@ pub async fn run() -> Result<()> {
                 enable_grammar: default_enable_grammar(),
                 enable_word_substitution: default_enable_word_substitution(),
                 enable_fuzzy_vocab: default_enable_fuzzy_vocab(),
+                enable_context_biasing: default_enable_context_biasing(),
                 silence_threshold_db: default_silence_threshold_db(),
                 debug_audio: default_debug_audio(),
                 trailing_buffer_ms: default_trailing_buffer_ms(),
@@ -1218,6 +1233,8 @@ pub async fn run() -> Result<()> {
     let mut media_was_playing = false;
     let mut _idle_inhibit: Option<idle_inhibit::IdleInhibitor> = None;
     let mut window_target: Option<window_target::WindowTarget> = None;
+    // Context biasing sources (window title, terminal pane, focused field).
+    let context_providers = context_sources::default_providers();
     let mut restart_requested = false;
     // Last injection context, kept so SnapshotCorrection can re-arm monitoring
     #[cfg(feature = "correction")]
@@ -1289,6 +1306,32 @@ pub async fn run() -> Result<()> {
                             // Mark audio as healthy at start
                             health_state.audio_healthy.store(true, Ordering::Relaxed);
 
+                            // Collect context after capture starts, so speech that
+                            // begins while the pane is read is buffered, not lost.
+                            let session_context =
+                                match (&window_target, config.daemon.enable_context_biasing) {
+                                    (Some(wt), true) => {
+                                        let target = context_sources::ContextTarget {
+                                            class: wt.class().to_string(),
+                                            title: wt.title().to_string(),
+                                            pid: wt.pid(),
+                                        };
+                                        let sources =
+                                            context_sources::collect(&context_providers, &target)
+                                                .await;
+                                        debug!("Context sources: {:?}", sources.kinds());
+                                        sources.extract(context_words::MAX_CONTEXT_WORDS)
+                                    }
+                                    _ => context_words::ContextWords::default(),
+                                };
+                            if !session_context.is_empty() {
+                                info!("Context biasing: {} words", session_context.len());
+                                debug!(
+                                    "Context words: {:?}",
+                                    session_context.iter().map(|w| &w.text).collect::<Vec<_>>()
+                                );
+                            }
+
                             // Recreate engine if it was released due to idle timeout
                             if preview_engine.is_none() {
                                 info!("Recreating transcription engine (was released for idle memory savings)...");
@@ -1304,6 +1347,8 @@ pub async fn run() -> Result<()> {
                             // Reset the pre-loaded engine for new session
                             let engine = preview_engine.as_ref().unwrap();
                             engine.reset();
+                            // Always set, so the previous session's words never carry over.
+                            engine.set_context_hotwords(&session_context.hotwords());
                             let session_engine = Arc::clone(engine);
 
                             // Signal UI to show
@@ -1315,6 +1360,7 @@ pub async fn run() -> Result<()> {
                             session = Some(RecordingSession {
                                 start_time: Instant::now(),
                                 engine: Arc::clone(&session_engine),
+                                context_words: session_context.clone(),
                             });
 
                             // Reset cancellation flag for new session
@@ -1402,6 +1448,7 @@ pub async fn run() -> Result<()> {
                                 user_dict: Some(Arc::clone(&user_dict)),
                                 word_sub: word_sub.clone(),
                                 llm: None,
+                                context_words: session_context,
                             };
                             let mut cancel_rx_preview = cancel_tx.subscribe();
                             preview_task = Some(tokio::spawn(async move {
@@ -1737,6 +1784,10 @@ pub async fn run() -> Result<()> {
                         user_dict: Some(Arc::clone(&user_dict)),
                         word_sub: word_sub.clone(),
                         llm: Some(config.llm_correction.clone()),
+                        context_words: session
+                            .as_ref()
+                            .map(|s| s.context_words.clone())
+                            .unwrap_or_default(),
                     };
                     let pipeline =
                         Pipeline::from_stages(&final_stages, &final_ctx, PipelinePass::Final);
@@ -2007,6 +2058,7 @@ pub async fn transcribe_file(
         user_dict: Some(Arc::clone(&user_dict)),
         word_sub,
         llm: Some(config.llm_correction.clone()),
+        ..StageContext::default()
     };
     let processed = Pipeline::from_stages(&stages, &ctx, PipelinePass::Final).process(&raw)?;
 

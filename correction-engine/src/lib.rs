@@ -12,6 +12,8 @@
 //! - **`connection`**: AT-SPI2 bus abstraction (trait-based for testability)
 //! - **`wezterm`**: wezterm-native backend (mux CLI pane polling) for
 //!   terminals AT-SPI2 cannot see
+//! - **`focused_text`**: one-shot read of the focused field's text around the
+//!   caret (used by context biasing, not correction detection)
 //!
 //! # Usage
 //!
@@ -39,12 +41,14 @@
 pub mod connection;
 pub mod diff;
 pub mod event_filter;
+pub mod focused_text;
 pub mod store;
 pub mod types;
 pub mod wezterm;
 
 // Re-export primary API types
 pub use connection::{AtspiConnection, MockTextChangeSource, TextChangeSource};
+pub use focused_text::FocusedTextReader;
 pub use store::CorrectionStore;
 pub use types::{
     CorrectionPair, CorrectionStats, InjectionContext, MonitorConfig, TextChangeEvent,
