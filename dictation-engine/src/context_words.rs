@@ -307,12 +307,6 @@ fn is_rare(part: &str) -> bool {
     !english().contains_word_str(part) && !near_english_word(part)
 }
 
-/// Whether `word` is a correctly spelled English word. A context word must
-/// never replace one (see [`crate::post_processing::FuzzyVocabularyProcessor`]).
-pub fn is_english_word(word: &str) -> bool {
-    english().contains_word_str(word)
-}
-
 /// Whether `word` is one edit (delete, insert, substitute, transpose) away
 /// from an English word: on screen that is a typo ("recieve") or a variant,
 /// not a distinctive term, and snapping speech onto it would make things worse.

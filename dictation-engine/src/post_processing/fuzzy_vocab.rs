@@ -31,10 +31,11 @@ use std::sync::Arc;
 /// next utterance without a restart.
 ///
 /// A session may extend the glossary with context words (see
-/// [`crate::context_words`]). They keep their on-screen spelling, lose to a
-/// user dictionary entry that normalizes the same, and are fuzzy-matched only
-/// on [`HIGH_SIMILARITY`] (no phonetic relaxation), since they were never
-/// vetted by the user.
+/// [`crate::context_words`]). They keep their on-screen spelling and lose to a
+/// user dictionary entry that normalizes the same. They take part in the
+/// exact (normalized) n-gram match only, never the fuzzy one: an unvetted
+/// on-screen word must not pull correct speech toward itself ("receive"
+/// toward a visible "recieve", "postgres" toward "postgresql").
 pub struct FuzzyVocabularyProcessor {
     dictionary: Arc<UserDictionary>,
     context: Vec<String>,
@@ -57,17 +58,14 @@ struct Glossary {
     /// normalized form -> canonical spelling (for exact n-gram lookup).
     exact: HashMap<String, String>,
     /// Entries eligible for single-token fuzzy matching (normalized len >= MIN).
+    /// User dictionary words only.
     fuzzy: Vec<FuzzyEntry>,
-    /// Whether any fuzzy entry is a context word.
-    has_context: bool,
 }
 
 struct FuzzyEntry {
     canonical: String,
     normalized: String,
     phonetic: String,
-    /// Temporary context word: fuzzy-matched on spelling similarity only.
-    context: bool,
 }
 
 impl FuzzyVocabularyProcessor {
@@ -97,24 +95,15 @@ impl FuzzyVocabularyProcessor {
                 continue;
             }
             exact.entry(normalized.clone()).or_insert_with(|| word.clone());
-            if normalized.chars().count() >= MIN_FUZZY_LEN {
+            if !is_context && normalized.chars().count() >= MIN_FUZZY_LEN {
                 fuzzy.push(FuzzyEntry {
                     canonical: word.clone(),
                     phonetic: phonetic_key(&normalized),
                     normalized,
-                    context: is_context,
                 });
             }
         }
-        let has_context = fuzzy.iter().any(|e| e.context);
-        Glossary { exact, fuzzy, has_context }
-    }
-
-    /// Whether the spoken token is already a valid word, which a context
-    /// entry must never replace: correct speech would otherwise be rewritten
-    /// into an on-screen variant ("received" into a visible "recieved").
-    fn is_known_word(&self, core: &str) -> bool {
-        crate::context_words::is_english_word(core) || self.dictionary.contains(core)
+        Glossary { exact, fuzzy }
     }
 }
 
@@ -164,8 +153,7 @@ impl TextProcessor for FuzzyVocabularyProcessor {
             // 2. Guarded single-token fuzzy match.
             let token = &tokens[i];
             let norm = normalize(&token.core);
-            let allow_context = glossary.has_context && !self.is_known_word(&token.core);
-            if let Some(canonical) = best_fuzzy_match(&norm, &glossary.fuzzy, allow_context) {
+            if let Some(canonical) = best_fuzzy_match(&norm, &glossary.fuzzy) {
                 out.push(format!("{}{}{}", token.prefix, canonical, token.suffix));
             } else {
                 out.push(token.original.clone());
@@ -279,9 +267,8 @@ fn similar_length(a: &str, b: &str) -> bool {
 
 /// Best glossary canonical for a normalized token, or `None` if nothing clears
 /// the confidence bar. Exact matches are handled earlier, so a token equal to a
-/// glossary term returns `None` here (no change needed). Context entries are
-/// considered only when `allow_context` (the token is not a valid word).
-fn best_fuzzy_match(norm: &str, entries: &[FuzzyEntry], allow_context: bool) -> Option<String> {
+/// glossary term returns `None` here (no change needed).
+fn best_fuzzy_match(norm: &str, entries: &[FuzzyEntry]) -> Option<String> {
     if norm.chars().count() < MIN_FUZZY_LEN {
         return None;
     }
@@ -291,16 +278,12 @@ fn best_fuzzy_match(norm: &str, entries: &[FuzzyEntry], allow_context: bool) -> 
         if entry.normalized == norm {
             return None; // exact — leave it (already correct)
         }
-        if entry.context && !allow_context {
-            continue;
-        }
         if !similar_length(norm, &entry.normalized) {
             continue;
         }
         let sim = strsim::jaro_winkler(norm, &entry.normalized);
-        let phonetic_match =
-            !entry.context && token_phon == entry.phonetic && sim >= PHONETIC_SIMILARITY;
-        let accept = sim >= HIGH_SIMILARITY || phonetic_match;
+        let accept =
+            sim >= HIGH_SIMILARITY || (token_phon == entry.phonetic && sim >= PHONETIC_SIMILARITY);
         if accept && best.map(|(b, _)| sim > b).unwrap_or(true) {
             best = Some((sim, &entry.canonical));
         }
@@ -352,27 +335,22 @@ mod tests {
     }
 
     #[test]
-    fn context_word_fuzzy_needs_high_similarity() {
+    fn context_words_are_never_fuzzy_matched() {
+        // Review cases: each on-screen word is within Jaro-Winkler 0.92 of
+        // correct speech, and none may pull it over.
+        let p = processor_with_context(&[], &["recieve"]);
+        assert_eq!(p.process("i receive mail").unwrap(), "i receive mail");
+        let p = processor_with_context(&[], &["Katharine"]);
+        assert_eq!(p.process("ask Katherine").unwrap(), "ask Katherine");
+        let p = processor_with_context(&[], &["postgresql"]);
+        assert_eq!(p.process("restart postgres now").unwrap(), "restart postgres now");
+        // Not even a non-word near-miss: only exact and joined matches count.
         let p = processor_with_context(&[], &["hyprctl"]);
-        // Close spelling variant still snaps.
-        assert_eq!(p.process("run hyprctrl please").unwrap(), "run hyprctl please");
-        // "hiprctl" scores 0.91 with a matching phonetic key: enough for a
-        // user dictionary word, not for an unvetted context word.
-        let p = processor_with_context(&[], &["hyprctl"]);
-        assert_eq!(p.process("run hiprctl").unwrap(), "run hiprctl");
+        assert_eq!(p.process("run hyprctrl").unwrap(), "run hyprctrl");
+        assert_eq!(p.process("run hyprctl").unwrap(), "run hyprctl");
+        // The same near-miss still snaps onto a user dictionary word.
         let p = processor_with(&["hyprctl"]);
         assert_eq!(p.process("run hiprctl").unwrap(), "run hyprctl");
-    }
-
-    #[test]
-    fn context_never_rewrites_a_valid_word() {
-        // An on-screen typo or variant must not replace correct speech.
-        let p = processor_with_context(&[], &["recieved", "Jonathon"]);
-        assert_eq!(p.process("i received it").unwrap(), "i received it");
-        assert_eq!(p.process("ask jonathan").unwrap(), "ask jonathan");
-        // User dictionary words are valid too.
-        let p = processor_with_context(&["hyprlands"], &["hyprland"]);
-        assert_eq!(p.process("hyprlands").unwrap(), "hyprlands");
     }
 
     #[test]

@@ -173,7 +173,8 @@ struct DaemonConfig {
 
     // Context biasing: at recording start, read the focused field (AT-SPI),
     // the wezterm pane and the window title, and bias this one utterance
-    // toward the distinctive words found there. Held in memory only.
+    // toward the distinctive words found there. Held in memory only. Off by
+    // default: it reads on-screen text and changes what fuzzy_vocab emits.
     #[serde(default = "default_enable_context_biasing")]
     enable_context_biasing: bool,
 
@@ -247,7 +248,7 @@ fn default_enable_word_substitution() -> bool {
     true
 }
 fn default_enable_context_biasing() -> bool {
-    true
+    false
 }
 fn default_silence_threshold_db() -> f32 {
     -60.0

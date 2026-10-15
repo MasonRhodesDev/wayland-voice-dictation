@@ -163,16 +163,21 @@ impl ContextProvider for WeztermPaneProvider {
     }
 }
 
-/// The pane the user is looking at: an active pane whose title appears in
-/// the window title (wezterm titles the window after its active pane), else
-/// the first active pane.
+/// The pane the user is looking at: the active pane whose title appears in
+/// the window title (wezterm titles the window after its active pane). When
+/// no pane matches, or several active panes in different windows do, the
+/// focused pane is unknown and `None` is returned, rather than reading a pane
+/// in some other window.
 #[cfg(feature = "correction")]
 fn pick_pane(panes: &[correction_engine::wezterm::PaneEntry], window_title: &str) -> Option<u64> {
-    let active = || panes.iter().filter(|p| p.is_active);
-    active()
-        .find(|p| !p.title.is_empty() && window_title.contains(&p.title))
-        .or_else(|| active().next())
-        .map(|p| p.pane_id)
+    let mut matches = panes
+        .iter()
+        .filter(|p| p.is_active && !p.title.is_empty() && window_title.contains(&p.title));
+    let first = matches.next()?;
+    match matches.next() {
+        None => Some(first.pane_id),
+        Some(_) => None,
+    }
 }
 
 /// Text around the caret of the focused field, over AT-SPI2. The fallback
@@ -325,7 +330,12 @@ mod tests {
         };
         let panes = vec![pane(1, false, "nvim"), pane(2, true, "zsh"), pane(3, true, "nvim")];
         assert_eq!(pick_pane(&panes, "[1/2] nvim"), Some(3));
-        assert_eq!(pick_pane(&panes, "something else"), Some(2));
+        // No active pane matches the focused window: no pane context, not
+        // the first active pane of some other window.
+        assert_eq!(pick_pane(&panes, "something else"), None);
         assert_eq!(pick_pane(&[pane(1, false, "x")], "x"), None);
+        // Two windows whose active panes both match: ambiguous, so none.
+        let twins = vec![pane(4, true, "zsh"), pane(5, true, "zsh")];
+        assert_eq!(pick_pane(&twins, "zsh"), None);
     }
 }
