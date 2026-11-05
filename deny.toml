@@ -14,6 +14,10 @@ ignore = [
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained; shapes local trusted text only (slint text stack), same rationale as ttf-parser" },
     { id = "RUSTSEC-2026-0194", reason = "quick-xml duplicate-attr quadratic scan; we never parse untrusted XML, fix needs semver-major of transitive dep" },
     { id = "RUSTSEC-2026-0195", reason = "quick-xml NsReader allocation DoS; same trusted-input rationale as 2026-0194" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained (folded into zbus 6); held on zbus 5 by accesskit, atspi, slint and ksni, no fix until they move" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained; same zbus 5 pin as 2026-0370" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; same zbus 5 pin as 2026-0370" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained; reached only through slint's spin_on, no upgrade available" },
 ]
 
 [licenses]
