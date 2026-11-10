@@ -8,8 +8,7 @@ use super::popup_manager::PopupManager;
 use super::surface_renderer::SurfaceRendererParams;
 use super::display_metrics::{DisplayMetrics, SharedDisplayMetrics};
 use crate::wayland::managed_proxies::{
-    ManagedWlPointer, ManagedWlSurface, ManagedZwlrLayerSurfaceV1,
-    ManagedWpFractionalScaleV1, ManagedWpViewport,
+    ManagedWlSurface, ManagedZwlrLayerSurfaceV1, ManagedWpFractionalScaleV1, ManagedWpViewport,
 };
 use crate::rendering::femtovg::main_window::FemtoVGWindow;
 use crate::errors::{LayerShikaError, Result};
@@ -20,7 +19,7 @@ use slint::{LogicalPosition, PhysicalSize};
 use slint::platform::WindowEvent;
 use slint_interpreter::{ComponentInstance, CompilationResult};
 use smithay_client_toolkit::reexports::protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
-use wayland_client::{protocol::wl_surface::WlSurface, Proxy};
+use wayland_client::{protocol::{wl_pointer::WlPointer, wl_surface::WlSurface}, Proxy};
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1;
 
 pub struct SurfaceState {
@@ -33,8 +32,13 @@ pub struct SurfaceState {
     /// until the first configure arrives. Matters for hotplug-created surfaces,
     /// which are built mid-event-loop.
     configured: Cell<bool>,
+    /// The seat's one `wl_pointer`, shared by every surface and owned by
+    /// `AppState`, which releases it when the shell shuts down. Held here as
+    /// a plain handle on purpose. A surface is dropped on every output
+    /// removal, and releasing the pointer from here took pointer input away
+    /// from every surface that was still alive.
     #[allow(dead_code)]
-    pointer: ManagedWlPointer,
+    pointer: Rc<WlPointer>,
 }
 
 impl SurfaceState {
@@ -86,7 +90,6 @@ impl SurfaceState {
         let layer_surface =
             ManagedZwlrLayerSurfaceV1::new(layer_surface_rc, Rc::clone(&connection));
         let surface = ManagedWlSurface::new(Rc::clone(&surface_rc), Rc::clone(&connection));
-        let pointer = ManagedWlPointer::new(pointer_rc, Rc::clone(&connection));
 
         let has_fractional_scale = fractional_scale.is_some();
         let size = builder.size.unwrap_or_default();
@@ -120,7 +123,7 @@ impl SurfaceState {
             event_context: RefCell::new(event_context),
             display_metrics,
             configured: Cell::new(false),
-            pointer,
+            pointer: pointer_rc,
         })
     }
 
