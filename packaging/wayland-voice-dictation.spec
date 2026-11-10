@@ -24,7 +24,7 @@
 %global __cargo_common_opts %{?_smp_mflags} -Z avoid-dev-deps --locked
 
 Name:           wayland-voice-dictation
-Version:        0.7.0
+Version:        0.7.1
 Release:        1%{?dist}
 # Renamed from hyprland-voice-dictation in 0.6.0; replace the old package on upgrade.
 Obsoletes:      hyprland-voice-dictation < 0.6.0
@@ -112,6 +112,14 @@ install -Dpm0755 scripts/download-parakeet-model.sh %{buildroot}%{_datadir}/%{na
 %{_datadir}/%{name}/download-parakeet-model.sh
 
 %changelog
+* Tue Nov 10 2026 Mason Rhodes <mrhodesdev@gmail.com> - 0.7.1-1
+- The overlay survives a monitor being removed. It destroyed its wl_surface
+  before the layer surface, which Hyprland answers with a fatal "invalid
+  object" protocol error, so every undock killed the daemon.
+- A removed monitor no longer releases the pointer for the overlays that
+  remain.
+- Hyprland's FALLBACK placeholder output is not expected to carry an overlay.
+
 * Fri Oct 09 2026 Mason Rhodes <mrhodesdev@gmail.com> - 0.7.0-1
 - Engines declare their post-processing stages; [pipeline] overrides them per engine.
 - New openai:gpt-live-transcribe realtime engine with live preview and batch fallback.

@@ -10,8 +10,8 @@
 # cargo dependencies themselves are fetched up front in prepare().
 
 pkgname=wayland-voice-dictation
-pkgver=0.7.0
-pkgrel=4
+pkgver=0.7.1
+pkgrel=1
 pkgdesc='Offline voice dictation for Wayland desktops with Parakeet speech recognition'
 arch=('x86_64' 'aarch64')
 options=(!lto)  # onig's C objects become GCC LTO bitcode that ld.lld cannot read (same as game-mode/ring)
