@@ -82,17 +82,29 @@ pub fn get_active_monitor_sync() -> Option<String> {
     })
 }
 
-/// Get the current monitor names via Hyprland IPC. Returns None when IPC is
-/// unavailable (non-Hyprland compositor, Hyprland restarting).
-pub fn get_monitor_names_sync() -> Option<Vec<String>> {
-    let value = hypr_ipc::hyprctl_json_std(&["-j", "monitors"]).ok()?;
+/// Hyprland's placeholder output, listed by `monitors` while no real monitor
+/// is enabled. It never gets a `wl_output`, so no overlay surface can exist
+/// on it and it must not be expected to have one.
+const FALLBACK_MONITOR: &str = "FALLBACK";
+
+/// Names of the real monitors in a `hyprctl -j monitors` payload.
+fn monitor_names_in(value: &serde_json::Value) -> Option<Vec<String>> {
     Some(
         value
             .as_array()?
             .iter()
-            .filter_map(|monitor| monitor.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .filter_map(|monitor| monitor.get("name").and_then(|n| n.as_str()))
+            .filter(|name| *name != FALLBACK_MONITOR)
+            .map(str::to_string)
             .collect(),
     )
+}
+
+/// Get the current monitor names via Hyprland IPC. Returns None when IPC is
+/// unavailable (non-Hyprland compositor, Hyprland restarting).
+pub fn get_monitor_names_sync() -> Option<Vec<String>> {
+    let value = hypr_ipc::hyprctl_json_std(&["-j", "monitors"]).ok()?;
+    monitor_names_in(&value)
 }
 
 /// Re-resolve the live Hyprland event socket (HIS, then lockfile rescan).
@@ -208,5 +220,23 @@ async fn listen_socket2(monitor: Arc<RwLock<String>>, wake: Arc<dyn Fn() + Send 
             set_active_monitor(name);
             wake();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::monitor_names_in;
+
+    #[test]
+    fn real_monitors_are_listed() {
+        let value = serde_json::json!([{ "name": "DP-1" }, { "name": "eDP-2" }]);
+        assert_eq!(monitor_names_in(&value), Some(vec!["DP-1".to_string(), "eDP-2".to_string()]));
+    }
+
+    #[test]
+    fn the_fallback_placeholder_is_not_a_monitor() {
+        // What Hyprland reports once every real output is gone.
+        let value = serde_json::json!([{ "name": "FALLBACK" }]);
+        assert_eq!(monitor_names_in(&value), Some(Vec::new()));
     }
 }

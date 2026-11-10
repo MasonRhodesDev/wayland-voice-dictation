@@ -15,3 +15,4 @@ tracing = "0.1"
 dictation-types = { path = "../dictation-types" }
 notify = "6"
 hypr-ipc = "0.1.0"
+serde_json = "1"
