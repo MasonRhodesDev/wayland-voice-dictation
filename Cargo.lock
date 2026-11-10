@@ -7823,6 +7823,7 @@ dependencies = [
  "hypr-slint-runtime",
  "layer-shika",
  "notify",
+ "serde_json",
  "slint",
  "tokio",
  "tracing",

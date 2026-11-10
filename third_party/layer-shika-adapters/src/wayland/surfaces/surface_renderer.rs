@@ -28,11 +28,20 @@ pub struct SurfaceRendererParams<W: RenderableWindow> {
 }
 
 pub struct SurfaceRenderer<W: RenderableWindow> {
+    // Field order is drop order, and the order matters on the wire. Every
+    // object that hangs off the wl_surface (the layer-surface role, the
+    // viewport, the fractional-scale object) has to be destroyed before the
+    // wl_surface itself. Hyprland destroys the layer-surface resource when
+    // its wl_surface goes, so a `zwlr_layer_surface_v1.destroy` sent after
+    // `wl_surface.destroy` targets an object the compositor no longer has.
+    // That is a fatal `invalid object` protocol error, and it kills the
+    // connection. This struct is dropped whenever an output is removed, so
+    // keep `surface` last.
     window: Rc<W>,
-    surface: ManagedWlSurface,
     layer_surface: ManagedZwlrLayerSurfaceV1,
     viewport: Option<ManagedWpViewport>,
     fractional_scale: Option<ManagedWpFractionalScaleV1>,
+    surface: ManagedWlSurface,
     height: u32,
     size: PhysicalSize,
     logical_size: PhysicalSize,
