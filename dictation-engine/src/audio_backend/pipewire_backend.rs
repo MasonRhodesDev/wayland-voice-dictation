@@ -1,8 +1,3 @@
-//! PipeWire native audio backend.
-//!
-//! This backend uses pipewire-rs for native PipeWire audio capture,
-//! enabling proper mic sharing with browsers without requiring idle timeouts.
-
 use anyhow::{anyhow, Context, Result};
 use pipewire as pw;
 use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
@@ -17,7 +12,6 @@ use tracing::{debug, error, info, warn};
 
 use super::{AudioBackend, AudioBackendConfig, AudioBackendFactory, DeviceInfo};
 
-/// Commands sent to the PipeWire thread.
 enum PwCommand {
     Start,
     Stop,
@@ -25,39 +19,25 @@ enum PwCommand {
     Quit,
 }
 
-/// Information about a discovered audio source node.
 #[derive(Clone, Debug)]
 struct AudioSourceInfo {
-    /// PipeWire node ID (for logging only)
-    #[allow(dead_code)] // logging/debug only
+    #[allow(dead_code)]
     id: u32,
-    /// Node name (e.g., "alsa_input.usb-...")
     name: String,
-    /// Object serial number (for stream targeting)
     object_serial: u32,
-    /// Description (e.g., "USB Microphone")
     description: String,
-    /// Media class (should be "Audio/Source")
     #[allow(dead_code)]
     media_class: String,
 }
 
-/// PipeWire native audio backend.
-///
-/// Uses a dedicated thread for the PipeWire MainLoop since it cannot
-/// run on tokio's async runtime.
 pub struct PipewireBackend {
-    /// Channel to send commands to the PipeWire thread.
     control_tx: std::sync::mpsc::Sender<PwCommand>,
-    /// Handle to the PipeWire thread.
     _thread: thread::JoinHandle<()>,
-    /// Whether the stream is currently capturing.
-    #[allow(dead_code)] // held for lifecycle parity with cpal backend
+    #[allow(dead_code)]
     is_running: Arc<AtomicBool>,
 }
 
 impl PipewireBackend {
-    /// Check if PipeWire is available on the system.
     pub fn is_available() -> bool {
         pw::init();
 
@@ -81,7 +61,6 @@ impl AudioBackendFactory for PipewireBackend {
     ) -> Result<Box<dyn AudioBackend>> {
         info!("Creating PipeWire audio backend...");
 
-        // Initialize PipeWire
         pw::init();
 
         let sample_rate = config.sample_rate;
@@ -89,13 +68,10 @@ impl AudioBackendFactory for PipewireBackend {
         let is_running = Arc::new(AtomicBool::new(false));
         let is_running_clone = is_running.clone();
 
-        // Create control channel
         let (control_tx, control_rx) = std::sync::mpsc::channel::<PwCommand>();
 
-        // Create crossbeam channel for bridging PW callback to async channel
         let (cb_tx, cb_rx) = crossbeam_channel::bounded::<Vec<i16>>(100);
 
-        // Spawn forwarder thread: crossbeam -> async mpsc
         let tx_clone = tx.clone();
         thread::spawn(move || {
             while let Ok(samples) = cb_rx.recv() {
@@ -105,7 +81,6 @@ impl AudioBackendFactory for PipewireBackend {
             }
         });
 
-        // Resolve device name to PipeWire target serial
         let device_name = config.device_name.clone();
         let target_serial = match &device_name {
             Some(name) if name != "default" => match enumerate_audio_sources() {
@@ -130,7 +105,6 @@ impl AudioBackendFactory for PipewireBackend {
             _ => None,
         };
 
-        // Spawn PipeWire thread
         let thread = thread::Builder::new()
             .name("pipewire-audio".into())
             .spawn(move || {
@@ -198,7 +172,6 @@ impl AudioBackend for PipewireBackend {
     }
 
     fn releases_on_stop(&self) -> bool {
-        // PipeWire supports native mic sharing - no need to release
         false
     }
 }
@@ -209,7 +182,6 @@ impl Drop for PipewireBackend {
     }
 }
 
-/// Enumerate audio source nodes from PipeWire.
 fn enumerate_audio_sources() -> Result<Vec<AudioSourceInfo>> {
     use std::cell::Cell;
 
@@ -294,12 +266,11 @@ fn enumerate_audio_sources() -> Result<Vec<AudioSourceInfo>> {
     Ok(result)
 }
 
-/// Build the audio format pod for stream negotiation.
 fn build_audio_format_pod(sample_rate: u32) -> Result<Vec<u8>> {
     let mut audio_info = AudioInfoRaw::new();
     audio_info.set_format(AudioFormat::F32LE);
     audio_info.set_rate(sample_rate);
-    audio_info.set_channels(1); // Mono for speech recognition
+    audio_info.set_channels(1);
 
     let mut buffer = vec![0u8; 1024];
     pw::spa::pod::serialize::PodSerializer::serialize(
@@ -315,7 +286,6 @@ fn build_audio_format_pod(sample_rate: u32) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
-/// Run the PipeWire MainLoop with single-stream capture.
 fn run_pipewire_thread(
     control_rx: std::sync::mpsc::Receiver<PwCommand>,
     audio_tx: crossbeam_channel::Sender<Vec<i16>>,
@@ -332,7 +302,6 @@ fn run_pipewire_thread(
 
     let core = context.connect_rc(None).context("Failed to connect to PipeWire daemon")?;
 
-    // Build audio format pod
     let format_buffer = build_audio_format_pod(sample_rate)?;
 
     let samples_dropped = Arc::new(AtomicU64::new(0));
@@ -351,7 +320,6 @@ fn run_pipewire_thread(
 
     info!("Created PipeWire capture stream (target_serial: {:?})", target_serial);
 
-    // Run mainloop with command polling
     let loop_clone = mainloop.loop_();
     let control_rx = std::sync::Arc::new(std::sync::Mutex::new(control_rx));
     let is_running_for_timer = is_running.clone();
@@ -392,7 +360,6 @@ fn run_pipewire_thread(
         Some(std::time::Duration::from_millis(10)),
     );
 
-    // Keep stream alive
     let _stream = stream;
 
     mainloop.run();
@@ -401,7 +368,6 @@ fn run_pipewire_thread(
     Ok(())
 }
 
-/// Create a capture stream for a specific audio source.
 #[allow(clippy::too_many_arguments)]
 fn create_capture_stream(
     core: pw::core::CoreRc,
@@ -465,7 +431,6 @@ fn create_capture_stream(
                                 )
                             };
 
-                            // Pre-filter silence
                             let rms: f32 = (f32_samples.iter().map(|&s| s * s).sum::<f32>()
                                 / f32_samples.len() as f32)
                                 .sqrt();

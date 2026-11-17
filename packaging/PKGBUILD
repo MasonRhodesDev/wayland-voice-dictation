@@ -1,20 +1,11 @@
 # Maintainer: Mason Rhodes <mrhodesdev@gmail.com>
-#
-# Arch package for wayland-voice-dictation. Same payload as the Fedora RPM
-# (packaging/wayland-voice-dictation.spec); all paths are identical across
-# both distros. Usable directly with makepkg from this directory after a
-# release tag is pushed.
-#
-# NOTE: the `ort` crate's build script downloads prebuilt ONNX Runtime
-# binaries at build time, so build() needs network access even though the
-# cargo dependencies themselves are fetched up front in prepare().
 
 pkgname=wayland-voice-dictation
 pkgver=0.7.1
 pkgrel=1
 pkgdesc='Offline voice dictation for Wayland desktops with Parakeet speech recognition'
 arch=('x86_64' 'aarch64')
-options=(!lto)  # onig's C objects become GCC LTO bitcode that ld.lld cannot read (same as game-mode/ring)
+options=(!lto)
 url='https://github.com/MasonRhodesDev/wayland-voice-dictation'
 license=('MIT' 'Apache-2.0')
 depends=('wtype' 'pipewire' 'alsa-lib' 'fontconfig' 'freetype2' 'libxkbcommon'

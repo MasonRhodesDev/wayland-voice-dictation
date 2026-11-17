@@ -7,7 +7,6 @@ WARNINGS=()
 echo "=== Checking System Dependencies ==="
 echo ""
 
-# Detect distro
 if [ -f /etc/fedora-release ]; then
     DISTRO="fedora"
 elif [ -f /etc/arch-release ]; then
@@ -17,7 +16,6 @@ else
     WARNINGS+=("Unknown distro - package names may differ")
 fi
 
-# Check Rust version
 echo "1. Checking Rust/Cargo..."
 if command -v cargo &> /dev/null; then
     RUST_VERSION=$(rustc --version | awk '{print $2}')
@@ -32,7 +30,6 @@ else
 fi
 echo ""
 
-# Check runtime dependencies
 echo "2. Checking runtime dependencies..."
 for cmd in wtype pkg-config; do
     if command -v $cmd &> /dev/null; then
@@ -42,7 +39,6 @@ for cmd in wtype pkg-config; do
     fi
 done
 
-# Check for audio tools (at least one needed)
 if command -v pactl &> /dev/null; then
     echo "   ✓ pactl (PulseAudio/PipeWire)"
 elif command -v pw-cli &> /dev/null; then
@@ -51,7 +47,6 @@ else
     WARNINGS+=("No audio tool found (pactl or pw-cli) - audio device enumeration may not work")
 fi
 
-# Check for Wayland compositor
 if [ -n "$WAYLAND_DISPLAY" ]; then
     echo "   ✓ Wayland compositor running ($WAYLAND_DISPLAY)"
 elif [ -n "$DISPLAY" ]; then
@@ -61,7 +56,6 @@ else
 fi
 echo ""
 
-# Check build-time library dependencies
 echo "3. Checking build libraries..."
 declare -A LIB_CHECKS=(
     ["alsa"]="ALSA (audio)"
@@ -83,7 +77,6 @@ for lib in "${!LIB_CHECKS[@]}"; do
     fi
 done
 
-# Check optional PipeWire library (for native backend)
 if pkg-config --exists "libpipewire-0.3" 2>/dev/null; then
     echo "   ✓ PipeWire native library (optional)"
 else
@@ -91,7 +84,6 @@ else
 fi
 echo ""
 
-# Check optional build tools
 echo "4. Checking optional tools..."
 if command -v rpmbuild &> /dev/null; then
     echo "   ✓ rpmbuild (RPM packaging)"
@@ -100,7 +92,6 @@ else
 fi
 echo ""
 
-# Summary
 if [ ${#WARNINGS[@]} -gt 0 ]; then
     echo "⚠️  Warnings:"
     for warning in "${WARNINGS[@]}"; do
@@ -127,7 +118,6 @@ else
     done
     echo ""
 
-    # Provide distro-specific install commands
     case "$DISTRO" in
         fedora)
             echo "Install on Fedora:"

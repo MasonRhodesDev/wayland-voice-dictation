@@ -1,18 +1,3 @@
-//! Named post-processing stages and per-engine pipeline resolution.
-//!
-//! Every text helper is a named [`Stage`]. Each transcription engine declares
-//! the stages it needs through [`crate::stream_engine::StreamingEngine::default_stages`]:
-//! the local Parakeet models declare the full helper chain, while hosted
-//! engines that already produce punctuated, cased, vocabulary-aware text
-//! declare none. The `[pipeline]` config section can override the list per
-//! provider, so stages can be swapped without code changes.
-//!
-//! Resolution order for one session:
-//! 1. The provider's `[pipeline]` entry, unless it is missing or `"default"`.
-//! 2. Otherwise the stages the engine declares.
-//! 3. The legacy `enable_*` flags then act as global off switches, so an
-//!    existing config keeps its exact behavior.
-
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -23,25 +8,16 @@ use super::{
 };
 use crate::user_dictionary::UserDictionary;
 
-/// One post-processing step. The string names are the config vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Stage {
-    /// "a p i" to "API".
     Acronyms,
-    /// Sentence casing and the pronoun "I".
     Punctuation,
-    /// Exact spoken-phrase rewrites from substitutions.txt.
     WordSubstitution,
-    /// Snap near-misses onto the user dictionary.
     FuzzyVocab,
-    /// Harper grammar and spell checking.
     Grammar,
-    /// LLM rewrite of the final text (self-corrections, glossary terms).
     LlmCorrection,
 }
 
-/// Canonical application order. A resolved stage list is always sorted into
-/// this order, so config order cannot produce a different result.
 const ORDER: [Stage; 6] = [
     Stage::Acronyms,
     Stage::Punctuation,
@@ -51,7 +27,6 @@ const ORDER: [Stage; 6] = [
     Stage::LlmCorrection,
 ];
 
-/// The helper chain the local models need (and had before stages existed).
 pub const LOCAL_MODEL_STAGES: &[Stage] = &[
     Stage::Acronyms,
     Stage::Punctuation,
@@ -76,15 +51,11 @@ impl Stage {
         ORDER.iter().copied().find(|s| s.name() == name)
     }
 
-    /// Whether the stage is cheap enough to run on every live preview update.
-    /// Grammar and LLM correction run on the final text only.
     pub fn runs_in_preview(self) -> bool {
         !matches!(self, Stage::Grammar | Stage::LlmCorrection)
     }
 }
 
-/// Legacy global switches from `[daemon]`. A `false` removes the stage from
-/// every engine's plan.
 #[derive(Debug, Clone, Copy)]
 pub struct StageSwitches {
     pub acronyms: bool,
@@ -114,16 +85,11 @@ impl StageSwitches {
             Stage::WordSubstitution => self.word_substitution,
             Stage::FuzzyVocab => self.fuzzy_vocab,
             Stage::Grammar => self.grammar,
-            Stage::LlmCorrection => true, // opt-in by listing it; no legacy flag
+            Stage::LlmCorrection => true,
         }
     }
 }
 
-/// Parse a comma-separated config stage list.
-///
-/// A missing value or `"default"` returns `None`, which means "use the
-/// engine's declaration". `"none"` or an empty string returns an empty list.
-/// Unknown names are logged and skipped, never fatal.
 pub fn parse_stage_list(value: Option<&str>) -> Option<Vec<Stage>> {
     let raw = value?.trim();
     if raw.eq_ignore_ascii_case("default") {
@@ -147,7 +113,6 @@ pub fn parse_stage_list(value: Option<&str>) -> Option<Vec<Stage>> {
     Some(out)
 }
 
-/// Resolve the final stage list for a session (see module docs).
 pub fn resolve_stages(
     declared: &[Stage],
     config_override: Option<&str>,
@@ -157,7 +122,6 @@ pub fn resolve_stages(
     ORDER.iter().copied().filter(|s| chosen.contains(s) && switches.allows(*s)).collect()
 }
 
-/// Render a stage list for logs.
 pub fn describe(stages: &[Stage]) -> String {
     if stages.is_empty() {
         "(none)".to_string()
@@ -166,7 +130,6 @@ pub fn describe(stages: &[Stage]) -> String {
     }
 }
 
-/// Shared resources a stage may need when it is built.
 #[derive(Clone, Default)]
 pub struct StageContext {
     pub user_dict: Option<Arc<UserDictionary>>,
@@ -174,7 +137,6 @@ pub struct StageContext {
     pub llm: Option<LlmCorrectionConfig>,
 }
 
-/// Which pass a pipeline serves. Preview drops the slow final-only stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelinePass {
     Preview,
@@ -182,9 +144,6 @@ pub enum PipelinePass {
 }
 
 impl Pipeline {
-    /// Build a pipeline from a resolved stage list. A stage whose resource is
-    /// missing (no substitutions file, no dictionary, no LLM config) is
-    /// skipped with a warning instead of failing the session.
     pub fn from_stages(stages: &[Stage], ctx: &StageContext, pass: PipelinePass) -> Self {
         let mut pipeline = Pipeline::new();
         for &stage in stages {

@@ -1,8 +1,3 @@
-//! Integration tests for the CorrectionMonitor using mock AT-SPI2 sources.
-//!
-//! These tests exercise the full monitoring pipeline without a real AT-SPI2 bus:
-//! mock events → filter → diff → store → persistence.
-
 use chrono::Utc;
 use correction_engine::connection::MockTextChangeSource;
 use correction_engine::store::CorrectionStore;
@@ -47,7 +42,7 @@ fn make_event(op: TextChangeOp, pos: i32, text: &str) -> TextChangeEvent {
 #[tokio::test]
 async fn test_full_correction_flow() {
     let dir = TempDir::new().unwrap();
-    let config = make_config(dir.path(), 5, 3); // 5s monitoring, threshold 3
+    let config = make_config(dir.path(), 5, 3);
     let store = CorrectionStore::empty(config.clone());
     let (mock_source, tx) = MockTextChangeSource::new(true);
 
@@ -56,15 +51,12 @@ async fn test_full_correction_flow() {
     let context = make_context("hello world");
     let handle = monitor.start_monitoring(context);
 
-    // Give the monitor a moment to subscribe
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Simulate: user deletes "world" and types "earth"
     tx.send(make_event(TextChangeOp::Delete, 6, "world")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
     tx.send(make_event(TextChangeOp::Insert, 6, "earth")).await.unwrap();
 
-    // Close the channel to end monitoring early
     drop(tx);
 
     let corrections = handle.await.unwrap();
@@ -76,7 +68,7 @@ async fn test_full_correction_flow() {
 #[tokio::test]
 async fn test_monitoring_timeout() {
     let dir = TempDir::new().unwrap();
-    let config = make_config(dir.path(), 1, 3); // 1s monitoring window
+    let config = make_config(dir.path(), 1, 3);
     let store = CorrectionStore::empty(config.clone());
     let (mock_source, _tx) = MockTextChangeSource::new(true);
 
@@ -85,7 +77,6 @@ async fn test_monitoring_timeout() {
     let context = make_context("hello world");
     let handle = monitor.start_monitoring(context);
 
-    // Don't send any events — wait for timeout
     let corrections = handle.await.unwrap();
     assert!(corrections.is_empty());
 }
@@ -95,7 +86,7 @@ async fn test_graceful_degradation() {
     let dir = TempDir::new().unwrap();
     let config = make_config(dir.path(), 2, 3);
     let store = CorrectionStore::empty(config.clone());
-    let (mock_source, _tx) = MockTextChangeSource::new(false); // AT-SPI2 unavailable
+    let (mock_source, _tx) = MockTextChangeSource::new(false);
 
     let monitor = CorrectionMonitor::with_source(Arc::new(mock_source), store, config);
 
@@ -111,9 +102,8 @@ async fn test_graceful_degradation() {
 #[tokio::test]
 async fn test_auto_promotion_e2e() {
     let dir = TempDir::new().unwrap();
-    let config = make_config(dir.path(), 2, 3); // threshold 3
+    let config = make_config(dir.path(), 2, 3);
 
-    // Run 3 monitoring sessions with the same correction
     for i in 0..3 {
         let store = CorrectionStore::load(&config).unwrap();
         let (mock_source, tx) = MockTextChangeSource::new(true);
@@ -124,7 +114,6 @@ async fn test_auto_promotion_e2e() {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Same correction each time: cash → cache
         tx.send(make_event(TextChangeOp::Delete, 4, "cash")).await.unwrap();
         tokio::time::sleep(Duration::from_millis(10)).await;
         tx.send(make_event(TextChangeOp::Insert, 4, "cache")).await.unwrap();
@@ -134,7 +123,6 @@ async fn test_auto_promotion_e2e() {
         assert_eq!(corrections.len(), 1, "Session {} should detect 1 correction", i);
     }
 
-    // After 3 sessions, check that the correction was auto-promoted
     let subs_content = std::fs::read_to_string(config.substitutions_path).unwrap();
     assert!(
         subs_content.contains("cash -> cache"),

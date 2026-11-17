@@ -1,41 +1,24 @@
-//! Monitor detection and active monitor tracking for Hyprland
-
 use std::sync::{Arc, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-/// If the event listener ran at least this long before returning, it was
-/// genuinely connected (as opposed to failing the connection attempt itself).
-/// Distinguishes "Hyprland restarted under us" from "IPC socket not up yet".
 const CONNECTED_THRESHOLD: Duration = Duration::from_secs(5);
 
-/// Delay between reconnect attempts
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Circuit breaker: max consecutive failed connection attempts before backing off
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
 
-/// Circuit breaker: cool-down period after repeated failures
 const CIRCUIT_BREAKER_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Global active monitor name. Empty string means "unknown" and makes the GUI
-/// fall back to showing on all monitors.
 static ACTIVE_MONITOR: OnceLock<Arc<RwLock<String>>> = OnceLock::new();
 
-/// Timestamp of the most recent compositor topology change (monitor add/remove,
-/// config reload, IPC loss). The GUI timer waits for this to settle, then
-/// verifies its surfaces against the live monitor list instead of blindly
-/// restarting the process on every event.
 static COMPOSITOR_CHANGED_AT: OnceLock<Arc<RwLock<Option<Instant>>>> = OnceLock::new();
 
 fn changed_at_cell() -> &'static Arc<RwLock<Option<Instant>>> {
     COMPOSITOR_CHANGED_AT.get_or_init(|| Arc::new(RwLock::new(None)))
 }
 
-/// Record a compositor topology change and refresh the active monitor, since
-/// focus may have moved without an `activemon` event (e.g. the focused monitor
-/// was unplugged).
 pub fn note_compositor_change(reason: &str) {
     info!("Compositor change ({reason}); will verify surfaces after events settle");
     if let Ok(mut guard) = changed_at_cell().write() {
@@ -46,7 +29,6 @@ pub fn note_compositor_change(reason: &str) {
     }
 }
 
-/// When the last compositor change happened, if one is pending verification
 pub fn pending_compositor_change() -> Option<Instant> {
     changed_at_cell().read().ok().and_then(|guard| *guard)
 }
@@ -65,12 +47,10 @@ fn set_active_monitor(name: String) {
     }
 }
 
-/// Get the currently active monitor name
 pub fn get_active_monitor() -> Option<String> {
     ACTIVE_MONITOR.get().and_then(|m| m.read().ok().map(|s| s.clone()))
 }
 
-/// Get the active monitor synchronously via Hyprland IPC
 pub fn get_active_monitor_sync() -> Option<String> {
     let value = hypr_ipc::hyprctl_json_std(&["-j", "monitors"]).ok()?;
     value.as_array()?.iter().find_map(|monitor| {
@@ -82,12 +62,8 @@ pub fn get_active_monitor_sync() -> Option<String> {
     })
 }
 
-/// Hyprland's placeholder output, listed by `monitors` while no real monitor
-/// is enabled. It never gets a `wl_output`, so no overlay surface can exist
-/// on it and it must not be expected to have one.
 const FALLBACK_MONITOR: &str = "FALLBACK";
 
-/// Names of the real monitors in a `hyprctl -j monitors` payload.
 fn monitor_names_in(value: &serde_json::Value) -> Option<Vec<String>> {
     Some(
         value
@@ -100,14 +76,11 @@ fn monitor_names_in(value: &serde_json::Value) -> Option<Vec<String>> {
     )
 }
 
-/// Get the current monitor names via Hyprland IPC. Returns None when IPC is
-/// unavailable (non-Hyprland compositor, Hyprland restarting).
 pub fn get_monitor_names_sync() -> Option<Vec<String>> {
     let value = hypr_ipc::hyprctl_json_std(&["-j", "monitors"]).ok()?;
     monitor_names_in(&value)
 }
 
-/// Re-resolve the live Hyprland event socket (HIS, then lockfile rescan).
 fn refresh_hyprland_environment() -> bool {
     match hypr_ipc::socket2_path() {
         Ok(path) => {
@@ -121,7 +94,6 @@ fn refresh_hyprland_environment() -> bool {
     }
 }
 
-/// Spawn a background thread to track active monitor changes
 pub fn spawn_active_monitor_listener(wake: Arc<dyn Fn() + Send + Sync>) {
     let initial = get_active_monitor_sync();
     info!("Initial active monitor from Hyprland IPC: {:?}", initial);
@@ -235,7 +207,6 @@ mod tests {
 
     #[test]
     fn the_fallback_placeholder_is_not_a_monitor() {
-        // What Hyprland reports once every real output is gone.
         let value = serde_json::json!([{ "name": "FALLBACK" }]);
         assert_eq!(monitor_names_in(&value), Some(Vec::new()));
     }

@@ -1,9 +1,3 @@
-//! Persistent correction store with frequency counting and auto-promotion.
-//!
-//! Corrections are stored in `~/.local/share/voice-dictation/corrections.json`.
-//! When a correction reaches the auto-promote threshold, it's appended to
-//! `substitutions.txt` in the existing `spoken -> replacement` format.
-
 use crate::types::{BlockedPair, CorrectionPair, CorrectionRecord, CorrectionStats, MonitorConfig};
 use anyhow::Result;
 use chrono::Utc;
@@ -13,12 +7,10 @@ use std::io::Write;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-/// Versioned store format for forward compatibility.
 #[derive(Debug, Serialize, Deserialize)]
 struct StoreFile {
     version: u32,
     corrections: Vec<CorrectionRecord>,
-    /// Rejected pairs — never re-recorded or promoted again.
     #[serde(default)]
     blocklist: Vec<BlockedPair>,
 }
@@ -29,7 +21,6 @@ impl Default for StoreFile {
     }
 }
 
-/// Persistent correction store with frequency counting and auto-promotion.
 pub struct CorrectionStore {
     records: Vec<CorrectionRecord>,
     blocklist: Vec<BlockedPair>,
@@ -37,10 +28,6 @@ pub struct CorrectionStore {
 }
 
 impl CorrectionStore {
-    /// Load the correction store from disk. Creates an empty store if the file doesn't exist.
-    ///
-    /// Unpromoted records whose `last_seen` is older than `config.max_age_days`
-    /// are pruned (aged out) on load.
     pub fn load(config: &MonitorConfig) -> Result<Self> {
         let store_file = if config.store_path.exists() {
             let content = fs::read_to_string(&config.store_path)?;
@@ -58,7 +45,6 @@ impl CorrectionStore {
             config: config.clone(),
         };
 
-        // Age out stale unpromoted pairs
         let cutoff = Utc::now() - chrono::Duration::days(i64::from(config.max_age_days));
         let before = store.records.len();
         store.records.retain(|r| r.promoted || r.last_seen >= cutoff);
@@ -79,12 +65,10 @@ impl CorrectionStore {
         Ok(store)
     }
 
-    /// Create an empty store with the given config (for testing).
     pub fn empty(config: MonitorConfig) -> Self {
         Self { records: Vec::new(), blocklist: Vec::new(), config }
     }
 
-    /// Save the correction store to disk.
     pub fn save(&self) -> Result<()> {
         let store_file = StoreFile {
             version: 1,
@@ -92,7 +76,6 @@ impl CorrectionStore {
             blocklist: self.blocklist.clone(),
         };
 
-        // Ensure parent directory exists
         if let Some(parent) = self.config.store_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -103,12 +86,6 @@ impl CorrectionStore {
         Ok(())
     }
 
-    /// Re-read records and blocklist from disk, discarding in-memory state.
-    ///
-    /// The daemon holds a long-lived in-memory store, but the `corrections`
-    /// CLI (`clear`, `remove`, `edit`) mutates corrections.json directly. Without
-    /// this, the daemon's stale in-memory copy clobbers those edits on its next
-    /// save. The daemon's file watcher calls this when the file changes on disk.
     pub fn reload(&mut self) -> Result<()> {
         let fresh = Self::load(&self.config)?;
         self.records = fresh.records;
@@ -116,14 +93,9 @@ impl CorrectionStore {
         Ok(())
     }
 
-    /// Record a correction pair. Increments count if seen before.
-    /// Returns true if this triggered auto-promotion to substitutions.txt.
-    ///
-    /// Blocklisted pairs (previously removed by the user) are silently dropped.
     pub fn record_correction(&mut self, pair: CorrectionPair) -> Result<bool> {
         let now = Utc::now();
 
-        // Normalize: lowercase comparison for matching
         let orig_lower = pair.original.to_lowercase();
         let corr_lower = pair.corrected.to_lowercase();
 
@@ -135,7 +107,6 @@ impl CorrectionStore {
             return Ok(false);
         }
 
-        // Look for existing record with same original → corrected mapping
         let existing_idx = self.records.iter().position(|r| {
             r.original.to_lowercase() == orig_lower && r.corrected.to_lowercase() == corr_lower
         });
@@ -149,7 +120,6 @@ impl CorrectionStore {
                 self.records[idx].original, self.records[idx].corrected, self.records[idx].count
             );
 
-            // Check if we should auto-promote
             if self.records[idx].count >= self.config.auto_promote_threshold
                 && !self.records[idx].promoted
             {
@@ -163,7 +133,6 @@ impl CorrectionStore {
             return Ok(false);
         }
 
-        // New correction
         info!("New correction recorded: '{}' → '{}'", pair.original, pair.corrected);
 
         let mut record = CorrectionRecord {
@@ -175,7 +144,6 @@ impl CorrectionStore {
             promoted: false,
         };
 
-        // Check immediate promotion (threshold of 1)
         if self.config.auto_promote_threshold <= 1 {
             record.promoted = true;
             promote_to_substitution_file(&self.config.substitutions_path, &record)?;
@@ -189,31 +157,23 @@ impl CorrectionStore {
         Ok(false)
     }
 
-    /// Look up all corrections matching a given original phrase.
     pub fn lookup(&self, original: &str) -> Vec<&CorrectionRecord> {
         let orig_lower = original.to_lowercase();
         self.records.iter().filter(|r| r.original.to_lowercase() == orig_lower).collect()
     }
 
-    /// All correction records, in store order.
     pub fn records(&self) -> &[CorrectionRecord] {
         &self.records
     }
 
-    /// All blocklisted (rejected) pairs.
     pub fn blocklist(&self) -> &[BlockedPair] {
         &self.blocklist
     }
 
-    /// Check whether a pair is blocklisted (case-insensitive).
     fn is_blocked(&self, orig_lower: &str, corr_lower: &str) -> bool {
         self.blocklist.iter().any(|b| b.original == orig_lower && b.corrected == corr_lower)
     }
 
-    /// Remove all corrections matching a given original phrase (case-insensitive).
-    ///
-    /// Removed pairs are added to the persisted blocklist so they are never
-    /// re-recorded or promoted again. Returns the removed records.
     pub fn remove(&mut self, original: &str) -> Result<Vec<CorrectionRecord>> {
         let orig_lower = original.to_lowercase();
         let now = Utc::now();
@@ -243,10 +203,6 @@ impl CorrectionStore {
         Ok(removed)
     }
 
-    /// Remove all correction records (the blocklist is kept).
-    ///
-    /// Unlike `remove()`, cleared pairs are NOT blocklisted — clearing means
-    /// "start fresh", so the same corrections can be learned again.
     pub fn clear(&mut self) -> Result<usize> {
         let count = self.records.len();
         self.records.clear();
@@ -257,7 +213,6 @@ impl CorrectionStore {
         Ok(count)
     }
 
-    /// Get aggregate statistics about the correction store.
     pub fn stats(&self) -> CorrectionStats {
         let total_corrections = self.records.len();
         let total_observations: u32 = self.records.iter().map(|r| r.count).sum();
@@ -268,20 +223,14 @@ impl CorrectionStore {
     }
 }
 
-/// Append a correction as a substitution rule to substitutions.txt.
-///
-/// Format: `original -> corrected` (same as WordSubstitutionProcessor expects).
-/// The daemon's existing file watcher will detect the change and hot-reload.
 fn promote_to_substitution_file(
     substitutions_path: &Path,
     record: &CorrectionRecord,
 ) -> Result<()> {
-    // Ensure parent directory exists
     if let Some(parent) = substitutions_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    // Check if this substitution already exists in the file
     if substitutions_path.exists() {
         let content = fs::read_to_string(substitutions_path)?;
         let needle = format!("{} -> {}", record.original.to_lowercase(), record.corrected);
@@ -294,10 +243,9 @@ fn promote_to_substitution_file(
         }
     }
 
-    // Append the new substitution
     let mut file = fs::OpenOptions::new().create(true).append(true).open(substitutions_path)?;
 
-    writeln!(file)?; // Ensure we start on a new line
+    writeln!(file)?;
     writeln!(file, "# Auto-promoted correction (seen {} times)", record.count)?;
     writeln!(file, "{} -> {}", record.original, record.corrected)?;
 
@@ -309,7 +257,6 @@ fn promote_to_substitution_file(
     Ok(())
 }
 
-/// Load the substitutions file and parse entries (for compatibility testing).
 pub fn load_substitutions_from_file(path: &Path) -> Result<Vec<(String, String)>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -403,15 +350,12 @@ mod tests {
         let config = make_config_in(dir.path());
         let mut store = CorrectionStore::empty(config.clone());
 
-        // Record 2 times — no promotion yet
         assert!(!store.record_correction(make_pair("cash", "cache")).unwrap());
         assert!(!store.record_correction(make_pair("cash", "cache")).unwrap());
 
-        // Third time — should trigger promotion
         let promoted = store.record_correction(make_pair("cash", "cache")).unwrap();
         assert!(promoted);
 
-        // Verify substitutions.txt was written
         let subs = load_substitutions_from_file(&config.substitutions_path).unwrap();
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].0, "cash");
@@ -422,12 +366,11 @@ mod tests {
     fn test_substitution_format_compatible() {
         let dir = TempDir::new().unwrap();
         let mut config = make_config_in(dir.path());
-        config.auto_promote_threshold = 1; // Promote immediately
+        config.auto_promote_threshold = 1;
         let mut store = CorrectionStore::empty(config.clone());
 
         store.record_correction(make_pair("shay moy", "chezmoi")).unwrap();
 
-        // Read raw file and verify format
         let content = fs::read_to_string(&config.substitutions_path).unwrap();
         assert!(
             content.contains("shay moy -> chezmoi"),
@@ -435,7 +378,6 @@ mod tests {
             content
         );
 
-        // Verify parseable by our loader (equivalent to WordSubstitutionProcessor::load_substitutions)
         let subs = load_substitutions_from_file(&config.substitutions_path).unwrap();
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].0, "shay moy");
@@ -447,14 +389,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config = make_config_in(dir.path());
 
-        // Create store, add corrections, save
         {
             let mut store = CorrectionStore::empty(config.clone());
             store.record_correction(make_pair("cash", "cache")).unwrap();
             store.record_correction(make_pair("hear", "here")).unwrap();
         }
 
-        // Load from disk and verify
         let store = CorrectionStore::load(&config).unwrap();
         assert_eq!(store.records.len(), 2);
 
@@ -499,10 +439,10 @@ mod tests {
         store.record_correction(make_pair("hear", "here")).unwrap();
 
         let stats = store.stats();
-        assert_eq!(stats.total_corrections, 2); // "cash→cache" and "hear→here"
-        assert_eq!(stats.total_observations, 4); // 3 + 1
-        assert_eq!(stats.promoted_count, 1); // "cash→cache" promoted at threshold 3
-        assert_eq!(stats.pending_count, 1); // "hear→here" pending
+        assert_eq!(stats.total_corrections, 2);
+        assert_eq!(stats.total_observations, 4);
+        assert_eq!(stats.promoted_count, 1);
+        assert_eq!(stats.pending_count, 1);
     }
 
     #[test]
@@ -511,19 +451,16 @@ mod tests {
         let config = make_config_in(dir.path());
         let mut store = CorrectionStore::empty(config.clone());
 
-        // Record 3 times to trigger promotion
         store.record_correction(make_pair("cash", "cache")).unwrap();
         store.record_correction(make_pair("cash", "cache")).unwrap();
         let promoted = store.record_correction(make_pair("cash", "cache")).unwrap();
         assert!(promoted);
 
-        // Record 2 more times — should NOT promote again
         let promoted = store.record_correction(make_pair("cash", "cache")).unwrap();
         assert!(!promoted);
         let promoted = store.record_correction(make_pair("cash", "cache")).unwrap();
         assert!(!promoted);
 
-        // substitutions.txt should have exactly one entry
         let subs = load_substitutions_from_file(&config.substitutions_path).unwrap();
         assert_eq!(subs.len(), 1);
     }
@@ -537,7 +474,6 @@ mod tests {
         store.record_correction(make_pair("Cash", "cache")).unwrap();
         store.record_correction(make_pair("cash", "Cache")).unwrap();
 
-        // Should match as same correction (case-insensitive)
         let records = store.lookup("cash");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].count, 2);
@@ -564,13 +500,11 @@ mod tests {
         assert!(store.lookup("cash").is_empty());
         assert_eq!(store.blocklist().len(), 1);
 
-        // Blocklisted pair is never re-recorded (case-insensitive)...
         for _ in 0..5 {
             assert!(!store.record_correction(make_pair("Cash", "Cache")).unwrap());
         }
         assert!(store.lookup("cash").is_empty());
 
-        // ...so it can never reach the promote threshold either
         let subs = load_substitutions_from_file(&config.substitutions_path).unwrap();
         assert!(subs.is_empty());
     }
@@ -610,19 +544,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config = make_config_in(dir.path());
 
-        // Daemon's long-lived in-memory store learns (and persists) a pair.
         let mut daemon_store = CorrectionStore::empty(config.clone());
         daemon_store.record_correction(make_pair("cash", "cache")).unwrap();
         assert_eq!(daemon_store.records().len(), 1);
 
-        // A separate process (the `corrections` CLI) clears the file on disk.
         {
             let mut cli_store = CorrectionStore::load(&config).unwrap();
             cli_store.clear().unwrap();
         }
 
-        // Without reload the daemon would clobber the clear on its next save;
-        // reload discards the stale in-memory copy and matches disk.
         daemon_store.reload().unwrap();
         assert!(daemon_store.records().is_empty());
     }
@@ -638,15 +568,13 @@ mod tests {
         store.remove("cash").unwrap();
 
         let cleared = store.clear().unwrap();
-        assert_eq!(cleared, 1); // only "hear" was left
+        assert_eq!(cleared, 1);
         assert!(store.records().is_empty());
         assert_eq!(store.blocklist().len(), 1);
 
-        // Cleared (non-blocklisted) pairs can be learned again
         store.record_correction(make_pair("hear", "here")).unwrap();
         assert_eq!(store.lookup("hear").len(), 1);
 
-        // Blocklist survives clear + reload
         let store = CorrectionStore::load(&config).unwrap();
         assert_eq!(store.blocklist().len(), 1);
         assert_eq!(store.records().len(), 1);
@@ -655,7 +583,7 @@ mod tests {
     #[test]
     fn test_aging_prunes_old_unpromoted_on_load() {
         let dir = TempDir::new().unwrap();
-        let config = make_config_in(dir.path()); // max_age_days: 30
+        let config = make_config_in(dir.path());
         let old = Utc::now() - chrono::Duration::days(40);
         let recent = Utc::now();
 
@@ -668,7 +596,6 @@ mod tests {
             promoted,
         };
 
-        // Note: no blocklist field — also exercises loading the old file format
         let file = serde_json::json!({
             "version": 1,
             "corrections": [
@@ -684,7 +611,6 @@ mod tests {
         assert_eq!(store.lookup("old-promoted").len(), 1, "promoted records never age out");
         assert_eq!(store.lookup("fresh-pending").len(), 1, "recent records are kept");
 
-        // Pruning was persisted
         let reloaded = CorrectionStore::load(&config).unwrap();
         assert_eq!(reloaded.records().len(), 2);
     }

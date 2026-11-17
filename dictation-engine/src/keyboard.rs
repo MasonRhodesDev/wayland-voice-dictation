@@ -1,5 +1,3 @@
-// Keyboard text injection via wtype
-
 use anyhow::Result;
 use std::time::Duration;
 use tracing::debug;
@@ -11,14 +9,11 @@ impl KeyboardInjector {
         Self
     }
 
-    #[allow(dead_code)] // fallback injection path
+    #[allow(dead_code)]
     pub async fn type_text(&self, text: &str, word_delay_ms: u64) -> Result<()> {
         self.type_text_with_progress(text, word_delay_ms, |_done, _total| {}).await
     }
 
-    /// Like `type_text`, but calls `on_progress(done, total)` (word counts) as
-    /// typing advances, so callers can surface live progress and prove the
-    /// injection is still moving rather than wedged.
     pub async fn type_text_with_progress(
         &self,
         text: &str,
@@ -32,8 +27,6 @@ impl KeyboardInjector {
         on_progress(0, total);
 
         if word_delay_ms > 0 {
-            // Rate-limited mode: word-by-word with delays to avoid overwhelming
-            // terminal UIs like Claude Code's React/Ink interface (React error #185)
             for (i, word) in words.iter().enumerate() {
                 let chunk = if i == 0 { (*word).to_string() } else { format!(" {}", word) };
 
@@ -49,7 +42,6 @@ impl KeyboardInjector {
                 tokio::time::sleep(Duration::from_millis(word_delay_ms)).await;
             }
         } else {
-            // Fast mode: type all text at once
             let output = tokio::process::Command::new("wtype").arg(text).output().await?;
 
             if !output.status.success() {
@@ -77,7 +69,6 @@ mod tests {
     async fn test_type_text_interface() {
         let injector = KeyboardInjector::new();
         let result = injector.type_text("test", 0).await;
-        // wtype may or may not be available in test environment
         assert!(result.is_ok() || result.is_err());
     }
 
@@ -85,7 +76,6 @@ mod tests {
     async fn test_type_text_word_delay() {
         let injector = KeyboardInjector::new();
         let result = injector.type_text("test", 50).await;
-        // wtype may or may not be available in test environment
         assert!(result.is_ok() || result.is_err());
     }
 }

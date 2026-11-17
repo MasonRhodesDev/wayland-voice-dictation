@@ -38,7 +38,6 @@ mod window_target;
 
 pub use dictation_types::{GuiControl, GuiState, GuiStatus};
 
-/// Check if media is playing and pause it. Returns true if media was paused.
 fn pause_media_if_playing() -> bool {
     let Ok(output) = std::process::Command::new("playerctl").arg("status").output() else {
         return false;
@@ -51,7 +50,6 @@ fn pause_media_if_playing() -> bool {
     playing
 }
 
-/// Resume media playback.
 fn resume_media() {
     let _ = std::process::Command::new("playerctl").arg("play").output();
     info!("Resumed media playback");
@@ -70,10 +68,8 @@ use post_processing::{
 use stream_engine::{StreamingEngine, TranscriptEvent};
 use user_dictionary::UserDictionary;
 
-// Re-export DaemonState from dbus_control
 use dbus_control::DaemonState;
 
-// Recording session context
 struct RecordingSession {
     #[allow(dead_code)]
     start_time: Instant,
@@ -83,7 +79,6 @@ struct RecordingSession {
 #[derive(Debug, Deserialize)]
 struct Config {
     daemon: DaemonConfig,
-    /// Per-provider post-processing stage lists (see `post_processing::stages`).
     #[serde(default)]
     pipeline: PipelineConfig,
     #[serde(default)]
@@ -92,8 +87,6 @@ struct Config {
     llm_correction: LlmCorrectionConfig,
 }
 
-/// `[pipeline]`: comma-separated stage names per provider. A missing entry or
-/// `"default"` uses the stages the engine declares; `"none"` runs nothing.
 #[derive(Debug, Default, Deserialize)]
 struct PipelineConfig {
     #[serde(default)]
@@ -112,7 +105,6 @@ impl PipelineConfig {
 }
 
 impl Config {
-    /// Legacy `enable_*` flags, applied as global off switches.
     fn stage_switches(&self) -> StageSwitches {
         StageSwitches {
             acronyms: self.daemon.enable_acronyms,
@@ -123,8 +115,6 @@ impl Config {
         }
     }
 
-    /// The stage list for a session: config override, else the engine's
-    /// declaration, then the legacy switches.
     fn session_stages(&self, spec: &ModelSpec, engine: &dyn StreamingEngine) -> Vec<Stage> {
         resolve_stages(
             &engine.default_stages(),
@@ -133,8 +123,6 @@ impl Config {
         )
     }
 
-    /// Engine construction options. Reads the user dictionary at call time so
-    /// a recreated engine picks up newly added words.
     fn engine_options(&self, user_dict: &UserDictionary) -> EngineOptions {
         EngineOptions { openai: self.openai.to_options(&user_dict.app_words()) }
     }
@@ -146,11 +134,9 @@ struct DaemonConfig {
     audio_device: String,
     sample_rate: String,
 
-    // Model selection (format: "parakeet:model_name")
     #[serde(default = "default_model", alias = "preview_model")]
     model: String,
 
-    // Post-processing
     #[serde(default = "default_enable_acronyms")]
     enable_acronyms: bool,
     #[serde(default = "default_enable_punctuation")]
@@ -160,40 +146,29 @@ struct DaemonConfig {
     #[serde(default = "default_enable_word_substitution")]
     enable_word_substitution: bool,
 
-    // Fuzzy-match transcribed words against the user dictionary to fix
-    // vendor/product names and acronyms (e.g. "life md" → "lifemd",
-    // "hyperland" → "hyprland"). Works with any engine; corrections improve as
-    // you add words with `dict add`.
     #[serde(default = "default_enable_fuzzy_vocab")]
     enable_fuzzy_vocab: bool,
 
-    // Audio capture
     #[serde(default = "default_silence_threshold_db")]
     silence_threshold_db: f32,
     #[serde(default = "default_debug_audio")]
     debug_audio: bool,
 
-    // Trailing audio buffer after stop command (captures final words)
     #[serde(default = "default_trailing_buffer_ms")]
     trailing_buffer_ms: u64,
 
-    // Audio backend selection: "auto" (default), "cpal", or "pipewire"
     #[serde(default = "default_audio_backend")]
     audio_backend: String,
 
-    // Idle release timeout: how long to keep mic open after stop before releasing (seconds)
     #[serde(default = "default_idle_release_timeout_secs")]
     idle_release_timeout_secs: u64,
 
-    // Delay before resuming media playback after recording stops (milliseconds)
     #[serde(default = "default_media_resume_delay_ms")]
     media_resume_delay_ms: u64,
 
-    // Engine idle timeout: drop ORT sessions after N seconds idle to reclaim BFCArena memory (seconds)
     #[serde(default = "default_engine_idle_timeout_secs")]
     engine_idle_timeout_secs: u64,
 
-    // Correction learning (AT-SPI2)
     #[serde(default = "default_enable_correction_learning")]
     enable_correction_learning: bool,
 
@@ -203,17 +178,12 @@ struct DaemonConfig {
     #[serde(default = "default_correction_auto_promote_threshold")]
     correction_auto_promote_threshold: u32,
 
-    // Unpromoted corrections older than this many days are pruned on daemon start
     #[serde(default = "default_correction_max_age_days")]
     correction_max_age_days: u32,
 
-    // Enable the GTK/Qt accessibility bridge (required for correction detection).
-    // Sets org.gnome.desktop.interface toolkit-accessibility to true on startup.
     #[serde(default = "default_enable_accessibility_bridge")]
     enable_accessibility_bridge: bool,
 
-    // Use the wezterm-native correction backend (mux CLI pane polling) when the
-    // injection target is wezterm, which AT-SPI2 cannot see.
     #[serde(default = "default_correction_backend_wezterm")]
     correction_backend_wezterm: bool,
 }
@@ -256,7 +226,7 @@ fn default_media_resume_delay_ms() -> u64 {
 }
 fn default_engine_idle_timeout_secs() -> u64 {
     300
-} // 5 minutes
+}
 fn default_enable_correction_learning() -> bool {
     true
 }
@@ -276,7 +246,6 @@ fn default_correction_backend_wezterm() -> bool {
     true
 }
 
-/// Convert decibels to linear amplitude (RMS threshold).
 fn db_to_linear(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
 }
@@ -294,7 +263,6 @@ fn load_config() -> Result<Config> {
     Ok(config)
 }
 
-/// Watch dictionary files and reload on changes.
 async fn watch_dictionary_files(user_dict: Arc<UserDictionary>) -> Result<()> {
     let paths = user_dict.watch_paths();
 
@@ -307,32 +275,25 @@ async fn watch_dictionary_files(user_dict: Arc<UserDictionary>) -> Result<()> {
 
     let (tx, mut rx) = mpsc::channel(100);
 
-    // Create watcher in a separate thread (notify requires blocking)
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
         if let Ok(event) = res {
             let _ = tx.blocking_send(event);
         }
     })?;
 
-    // Watch all dictionary paths
     for path in &paths {
         if path.exists() {
             watcher.watch(path, RecursiveMode::NonRecursive)?;
-        } else {
-            // Watch parent directory to detect file creation
-            if let Some(parent) = path.parent() {
-                if parent.exists() {
-                    watcher.watch(parent, RecursiveMode::NonRecursive)?;
-                }
+        } else if let Some(parent) = path.parent() {
+            if parent.exists() {
+                watcher.watch(parent, RecursiveMode::NonRecursive)?;
             }
         }
     }
 
-    // Keep watcher alive and process events
     while let Some(event) = rx.recv().await {
         match event.kind {
             EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                // Check if event is for one of our dictionary files
                 for path in &paths {
                     if event.paths.iter().any(|p| p == path) {
                         info!("Dictionary file changed: {:?}, reloading...", path);
@@ -352,7 +313,6 @@ async fn watch_dictionary_files(user_dict: Arc<UserDictionary>) -> Result<()> {
     Ok(())
 }
 
-/// Watch substitution file and reload on changes.
 async fn watch_substitution_file(word_sub: WordSubstitutionProcessor) -> Result<()> {
     let path = WordSubstitutionProcessor::watch_path();
 
@@ -398,11 +358,6 @@ async fn watch_substitution_file(word_sub: WordSubstitutionProcessor) -> Result<
     Ok(())
 }
 
-/// Watch the learned-corrections store and reload it on external changes.
-///
-/// The daemon keeps corrections.json in memory, but the `corrections` CLI
-/// (`clear`, `remove`, `edit`) writes the file directly. Without this reload
-/// the daemon's stale in-memory copy clobbers those edits on its next save.
 #[cfg(feature = "correction")]
 async fn watch_corrections_file(
     store: Arc<tokio::sync::Mutex<correction_engine::CorrectionStore>>,
@@ -445,17 +400,11 @@ async fn watch_corrections_file(
     Ok(())
 }
 
-/// Health state shared between subsystems and D-Bus service.
 pub struct HealthState {
-    /// Whether audio is flowing (updated by audio forwarding thread)
     pub audio_healthy: AtomicBool,
-    /// Whether the engine has produced a successful transcription
     pub engine_healthy: AtomicBool,
-    /// Whether the GUI is available
     pub gui_healthy: AtomicBool,
-    /// Timestamp (ms since epoch) of last audio received
     pub last_audio_timestamp_ms: AtomicU64,
-    /// Last error message (if any)
     pub last_error: RwLock<Option<String>>,
 }
 
@@ -470,37 +419,28 @@ impl HealthState {
         }
     }
 
-    /// Check if all subsystems are healthy enough to send watchdog keepalive
     pub fn is_healthy(&self) -> bool {
-        // Engine health is the critical check - if it loaded, we're functional
-        // Audio health is only relevant during recording
         self.engine_healthy.load(Ordering::Relaxed)
     }
 }
 
-/// Configuration for DeviceManager
 #[derive(Clone)]
 struct DeviceManagerConfig {
     backend_type: BackendType,
     backend_config: AudioBackendConfig,
-    /// Idle timeout before releasing microphone (seconds). 0 = release immediately.
     idle_release_timeout_secs: u64,
 }
 
-/// Manages audio devices with idle timeout and hotplug support.
 struct DeviceManager {
     config: DeviceManagerConfig,
     backend: Option<Box<dyn AudioBackend>>,
     audio_tx: mpsc::UnboundedSender<Vec<i16>>,
     needs_recreate: Arc<std::sync::atomic::AtomicBool>,
-    /// When the audio was last stopped (for idle timeout tracking)
     stopped_at: Option<Instant>,
 }
 
 impl DeviceManager {
-    /// Create a new DeviceManager with pre-created audio backend.
     fn new(config: DeviceManagerConfig, audio_tx: mpsc::UnboundedSender<Vec<i16>>) -> Result<Self> {
-        // Create initial backend (streams created but paused)
         info!("DeviceManager: Pre-creating audio backend ({:?})...", config.backend_type);
         let backend = Self::create_backend(&config, audio_tx.clone())?;
 
@@ -513,7 +453,6 @@ impl DeviceManager {
         })
     }
 
-    /// Create an audio backend with the given config
     fn create_backend(
         config: &DeviceManagerConfig,
         tx: mpsc::UnboundedSender<Vec<i16>>,
@@ -521,25 +460,19 @@ impl DeviceManager {
         audio_backend::create_backend(config.backend_type, tx, &config.backend_config)
     }
 
-    /// Start recording - recreates audio backend if needed.
-    /// Includes retry logic for transient device failures.
     fn start(&mut self) -> Result<()> {
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
-        // Clear stopped_at - we're starting again, so no longer idle
         if self.stopped_at.take().is_some() {
             debug!("DeviceManager: Cleared idle timer (restarting before timeout)");
         }
 
-        // Clear the needs_recreate flag (we'll recreate anyway if backend is None)
         self.needs_recreate.swap(false, std::sync::atomic::Ordering::SeqCst);
 
-        // Recreate backend if it was released (dropped after idle) or device changed
         if self.backend.is_none() {
             info!("DeviceManager: Creating audio backend...");
 
-            // Retry backend creation with backoff
             let mut last_error = None;
             for attempt in 1..=MAX_RETRIES {
                 match Self::create_backend(&self.config, self.audio_tx.clone()) {
@@ -577,7 +510,6 @@ impl DeviceManager {
         Ok(())
     }
 
-    /// Stop recording.
     fn stop(&mut self) -> Result<()> {
         if let Some(ref backend) = self.backend {
             backend.stop()?;
@@ -603,7 +535,6 @@ impl DeviceManager {
         Ok(())
     }
 
-    /// Flush any buffered audio data from the backend.
     fn flush(&self) -> Result<()> {
         if let Some(ref backend) = self.backend {
             backend.flush()?;
@@ -611,7 +542,6 @@ impl DeviceManager {
         Ok(())
     }
 
-    /// Check if idle timeout has expired and release backend if so.
     fn check_idle_timeout(&mut self) -> bool {
         if let Some(stopped_at) = self.stopped_at {
             let idle_duration = stopped_at.elapsed();
@@ -625,26 +555,22 @@ impl DeviceManager {
         false
     }
 
-    /// Release the audio backend (drop streams, release microphone).
     fn release(&mut self) {
         if self.backend.take().is_some() {
             info!("DeviceManager: Audio backend released after idle timeout");
         }
     }
 
-    /// Switch to a different audio input device. Takes effect on next recording start.
     fn set_device(&mut self, device_name: Option<String>) {
         info!(
             "DeviceManager: Switching device to {:?}",
             device_name.as_deref().unwrap_or("Default")
         );
         self.config.backend_config.device_name = device_name;
-        // Drop existing backend so next start() recreates with the new device
         self.backend.take();
         self.stopped_at = None;
     }
 
-    /// Spawn a background task to watch for device changes
     fn spawn_device_watcher(&self) {
         let needs_recreate = Arc::clone(&self.needs_recreate);
 
@@ -683,7 +609,6 @@ impl DeviceManager {
 
             info!("DeviceManager: Watching /dev/snd for device changes");
 
-            // Keep thread alive
             loop {
                 std::thread::sleep(Duration::from_secs(60));
             }
@@ -691,7 +616,6 @@ impl DeviceManager {
     }
 }
 
-/// Drain remaining samples from audio channel with timeout.
 #[allow(dead_code)]
 async fn drain_audio_channel(
     audio_rx: &Arc<Mutex<mpsc::UnboundedReceiver<Vec<i16>>>>,
@@ -718,8 +642,8 @@ async fn drain_audio_channel(
                 }
                 drained += 1;
             }
-            Ok(None) => break, // Channel closed
-            Err(_) => break,   // Timeout - no more data
+            Ok(None) => break,
+            Err(_) => break,
         }
     }
 
@@ -727,8 +651,6 @@ async fn drain_audio_channel(
     drained
 }
 
-/// Await the engine's `Final` event after `finish()`, skipping any stray partials.
-/// Returns an empty string on error, closed stream, or timeout (logged).
 async fn recv_final_transcript(rx: &mut stream_engine::EventStream) -> String {
     loop {
         match tokio::time::timeout(Duration::from_secs(60), rx.recv()).await {
@@ -750,11 +672,6 @@ async fn recv_final_transcript(rx: &mut stream_engine::EventStream) -> String {
     }
 }
 
-/// Guarantees the GUI is driven out of the Processing state even if the processing
-/// path returns early via `?`. The Processing overlay runs a continuous spinner
-/// animation, so a Processing state that never clears pins a CPU core (the GUI also
-/// has a hard watchdog as a final backstop). Armed on construction; call `disarm()`
-/// on the normal success path so it does not fire a redundant SetHidden.
 struct ProcessingGuard {
     tx: broadcast::Sender<GuiControl>,
     armed: bool,
@@ -827,7 +744,6 @@ pub async fn run() -> Result<()> {
         16000
     });
 
-    // Convert silence threshold from dB to linear RMS value
     let silence_threshold = db_to_linear(config.daemon.silence_threshold_db);
     info!(
         "Silence threshold: {:.1}dB ({:.6} linear)",
@@ -839,14 +755,12 @@ pub async fn run() -> Result<()> {
         config.daemon.audio_device, sample_rate
     );
 
-    // Initialize user dictionary
     let user_dict = Arc::new(UserDictionary::new().unwrap_or_else(|e| {
         warn!("Failed to initialize user dictionary: {}, spell checking will use defaults only", e);
         UserDictionary::empty()
     }));
     info!("User dictionary initialized");
 
-    // Spawn file watcher for dictionary hot-reload
     let user_dict_watcher = Arc::clone(&user_dict);
     tokio::spawn(async move {
         if let Err(e) = watch_dictionary_files(user_dict_watcher).await {
@@ -854,7 +768,6 @@ pub async fn run() -> Result<()> {
         }
     });
 
-    // Initialize word substitution processor
     let word_sub = if config.daemon.enable_word_substitution {
         match WordSubstitutionProcessor::new(Some(Arc::clone(&user_dict))) {
             Ok(ws) => {
@@ -870,7 +783,6 @@ pub async fn run() -> Result<()> {
         None
     };
 
-    // Spawn file watcher for substitutions hot-reload
     if let Some(ref ws) = word_sub {
         let ws_watcher = ws.clone();
         tokio::spawn(async move {
@@ -880,9 +792,6 @@ pub async fn run() -> Result<()> {
         });
     }
 
-    // Enable the accessibility bridge if correction learning is on.
-    // GTK apps check org.gnome.desktop.interface toolkit-accessibility to decide
-    // whether to load the AT-SPI2 bridge. Without this, no text-changed events.
     #[cfg(feature = "correction")]
     if config.daemon.enable_correction_learning && config.daemon.enable_accessibility_bridge {
         match tokio::process::Command::new("gsettings")
@@ -913,7 +822,6 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Initialize correction monitor (AT-SPI2 based)
     #[cfg(feature = "correction")]
     let correction_monitor = if config.daemon.enable_correction_learning {
         let vd_dir = xdg_paths::ConfigDirs::from_env()
@@ -946,10 +854,6 @@ pub async fn run() -> Result<()> {
         None
     };
 
-    // Initialize the wezterm-native correction backend. AT-SPI2 cannot see
-    // wezterm, so injections targeting wezterm are monitored by polling the
-    // mux CLI instead. Socket discovery happens lazily per monitoring run, so
-    // this works regardless of whether wezterm is running at daemon startup.
     #[cfg(feature = "correction")]
     let wezterm_monitor =
         if config.daemon.enable_correction_learning && config.daemon.correction_backend_wezterm {
@@ -964,8 +868,6 @@ pub async fn run() -> Result<()> {
                 store_path: vd_dir.join("corrections.json"),
                 substitutions_path: vd_dir.join("substitutions.txt"),
             };
-            // Share the store with the AT-SPI monitor when it exists, so the two
-            // backends don't clobber each other's saves of corrections.json.
             let monitor = match correction_monitor.as_ref() {
                 Some(atspi_monitor) => Some(correction_engine::WeztermMonitor::with_shared_store(
                     atspi_monitor.store_handle(),
@@ -990,9 +892,6 @@ pub async fn run() -> Result<()> {
             None
         };
 
-    // Reload the in-memory store when the `corrections` CLI edits the file, so
-    // external clear/remove/edit aren't clobbered by the daemon's next save.
-    // Both backends share one store, so either handle points at the same data.
     #[cfg(feature = "correction")]
     {
         let store_handle = correction_monitor
@@ -1011,13 +910,11 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Parse model specification (Parakeet only)
     let model_spec = ModelSpec::parse(&config.daemon.model)
         .map_err(|e| anyhow::anyhow!("Invalid model '{}': {}", config.daemon.model, e))?;
 
     info!("Model: {}", model_spec);
 
-    // Validate that configured model is available
     if !model_spec.is_available() {
         return Err(anyhow::anyhow!(
             "Model '{}' not found at {:?}. Check that the model is installed.",
@@ -1026,11 +923,8 @@ pub async fn run() -> Result<()> {
         ));
     }
 
-    // Create shared health state
     let health_state = Arc::new(HealthState::new());
 
-    // Spawn dedicated watchdog task — decoupled from the event loop so long typing/processing
-    // operations don't starve the watchdog and cause systemd to kill us.
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         loop {
@@ -1041,16 +935,13 @@ pub async fn run() -> Result<()> {
         }
     });
 
-    // Create audio channel (shared between DeviceManager and processing)
     let (audio_tx, audio_rx) = mpsc::unbounded_channel::<Vec<i16>>();
     let audio_rx_shared = Arc::new(tokio::sync::Mutex::new(audio_rx));
 
-    // Create GUI channels for integrated communication
     let (gui_control_tx, _) = broadcast::channel::<GuiControl>(100);
     let (spectrum_tx, _) = broadcast::channel::<Vec<f32>>(50);
     let (gui_status_tx, mut gui_status_rx) = mpsc::channel::<GuiStatus>(10);
 
-    // Parse audio device config
     let audio_device_name =
         if config.daemon.audio_device.is_empty() || config.daemon.audio_device == "default" {
             None
@@ -1058,13 +949,11 @@ pub async fn run() -> Result<()> {
             Some(config.daemon.audio_device.clone())
         };
 
-    // Parse audio backend type
     let backend_type = BackendType::from_str(&config.daemon.audio_backend).unwrap_or_else(|| {
         warn!("Unknown audio backend '{}', using auto", config.daemon.audio_backend);
         BackendType::Auto
     });
 
-    // Create DeviceManager with eager-loaded audio backend
     info!("Creating DeviceManager with pre-loaded audio backend...");
     let device_manager_config = DeviceManagerConfig {
         backend_type,
@@ -1077,13 +966,11 @@ pub async fn run() -> Result<()> {
     };
     let mut device_manager = DeviceManager::new(device_manager_config, audio_tx)?;
 
-    // Spawn device hotplug watcher
     device_manager.spawn_device_watcher();
     info!("Audio streams pre-loaded and ready (fast startup enabled)");
 
     let keyboard = Arc::new(KeyboardInjector::new());
 
-    // Spawn integrated GUI
     info!("Spawning integrated GUI...");
     let gui_control_tx_gui = gui_control_tx.clone();
     let spectrum_tx_gui = spectrum_tx.clone();
@@ -1098,9 +985,6 @@ pub async fn run() -> Result<()> {
         )
     });
 
-    // Wait for GUI to initialize (bounded). The GUI retries shell creation with
-    // backoff (e.g. when outputs are momentarily gone after resume), so a transient
-    // Error is not final — keep listening until Ready or the deadline.
     info!("Waiting for GUI to initialize...");
     let gui_init_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut gui_available = false;
@@ -1115,9 +999,7 @@ pub async fn run() -> Result<()> {
             Ok(Some(GuiStatus::Error(e))) => {
                 warn!("GUI initialization error (may retry): {}", e);
             }
-            Ok(Some(GuiStatus::TransitionComplete { .. })) => {
-                // Early control traffic; not an init verdict.
-            }
+            Ok(Some(GuiStatus::TransitionComplete { .. })) => {}
             Ok(Some(GuiStatus::ShuttingDown)) => {
                 warn!("GUI is shutting down during init, continuing without GUI");
                 break;
@@ -1141,10 +1023,6 @@ pub async fn run() -> Result<()> {
         info!("Running without visual overlay until the GUI reports ready");
     }
 
-    // Keep draining GUI status for the daemon's lifetime. This keeps gui_healthy
-    // accurate when the GUI becomes ready later (or degrades), and prevents the
-    // bounded status channel from filling up — a full channel would block the GUI
-    // thread's next blocking_send forever.
     if channel_open {
         let gui_health = Arc::clone(&health_state);
         tokio::spawn(async move {
@@ -1168,7 +1046,6 @@ pub async fn run() -> Result<()> {
         });
     }
 
-    // Pre-load engine at startup for instant recording start
     info!("Pre-loading Parakeet engine (blocking call before D-Bus)...");
     let mut preview_engine: Option<Arc<dyn StreamingEngine>> =
         Some(model_spec.create_streaming_engine(sample_rate, &config.engine_options(&user_dict))?);
@@ -1182,16 +1059,13 @@ pub async fn run() -> Result<()> {
     let mut engine_stopped_at: Option<Instant> = None;
     info!("Parakeet engine loaded and ready");
 
-    // Mark engine as healthy after successful load
     health_state.engine_healthy.store(true, Ordering::Relaxed);
 
-    // Create watch channel for state sharing with D-Bus
     let (state_tx, state_rx) = tokio::sync::watch::channel(DaemonState::Idle);
 
-    // Create D-Bus service for control commands with health state
     let (dbus_conn, command_sender, mut command_rx) =
         dbus_control::create_dbus_service(state_rx, Arc::clone(&health_state)).await?;
-    let _dbus_conn = dbus_conn; // Keep alive
+    let _dbus_conn = dbus_conn;
 
     #[cfg(feature = "tray")]
     let _tray_handle = {
@@ -1200,17 +1074,14 @@ pub async fn run() -> Result<()> {
         tray::spawn_tray(tray_rx, tray_tx, backend_type, audio_device_name.clone())
     };
 
-    // Keep command_sender alive (used by D-Bus service)
     let _command_sender = command_sender;
 
     info!("Daemon initialized - entering idle state (GUI hidden)");
 
-    // Notify systemd that we're ready
     if let Err(e) = notify(false, [(STATE_READY, "1")].iter()) {
         warn!("Failed to notify systemd (Ready): {}", e);
     }
 
-    // State machine variables
     let mut daemon_state = DaemonState::Idle;
     let mut session: Option<RecordingSession> = None;
     let mut audio_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -1219,25 +1090,19 @@ pub async fn run() -> Result<()> {
     let mut _idle_inhibit: Option<idle_inhibit::IdleInhibitor> = None;
     let mut window_target: Option<window_target::WindowTarget> = None;
     let mut restart_requested = false;
-    // Last injection context, kept so SnapshotCorrection can re-arm monitoring
     #[cfg(feature = "correction")]
     let mut last_injection: Option<correction_engine::InjectionContext> = None;
-    // Cancellation channel for graceful task shutdown
     let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
 
-    // Audio health monitoring constants
     let _audio_health_timeout = Duration::from_secs(3);
 
-    // ===== PERSISTENT STATE MACHINE LOOP =====
     loop {
         match daemon_state {
             DaemonState::Idle => {
-                // Check for idle timeout (release mic if idle too long)
                 if device_manager.check_idle_timeout() {
                     debug!("Idle timeout expired, mic released");
                 }
 
-                // Check engine idle timeout (release ORT sessions to reclaim BFCArena memory)
                 if let Some(stopped_at) = engine_stopped_at {
                     let timeout = Duration::from_secs(config.daemon.engine_idle_timeout_secs);
                     if stopped_at.elapsed() >= timeout && preview_engine.is_some() {
@@ -1248,12 +1113,10 @@ pub async fn run() -> Result<()> {
                     }
                 }
 
-                // Wait for D-Bus commands with timeout
                 match tokio::time::timeout(Duration::from_millis(100), command_rx.recv()).await {
                     Ok(Some(cmd)) => match cmd {
                         DaemonCommand::StartRecording => {
                             info!("Received StartRecording command");
-                            // Capture focused window before pausing media (to lock typing target)
                             window_target = window_target::WindowTarget::capture().await;
                             if let Some(ref wt) = window_target {
                                 info!("Captured window target: class={}", wt.class());
@@ -1270,7 +1133,6 @@ pub async fn run() -> Result<()> {
                                     }
                                 };
 
-                            // Drain any stale audio data from the channel before starting
                             {
                                 let mut rx = audio_rx_shared.lock().await;
                                 let mut drained = 0;
@@ -1282,14 +1144,11 @@ pub async fn run() -> Result<()> {
                                 }
                             }
 
-                            // Start pre-loaded audio streams (fast - no device enumeration)
                             device_manager.start()?;
                             info!("Audio capture started (pre-loaded streams)");
 
-                            // Mark audio as healthy at start
                             health_state.audio_healthy.store(true, Ordering::Relaxed);
 
-                            // Recreate engine if it was released due to idle timeout
                             if preview_engine.is_none() {
                                 info!("Recreating transcription engine (was released for idle memory savings)...");
                                 preview_engine = Some(model_spec.create_streaming_engine(
@@ -1301,29 +1160,23 @@ pub async fn run() -> Result<()> {
                             }
                             engine_stopped_at = None;
 
-                            // Reset the pre-loaded engine for new session
                             let engine = preview_engine.as_ref().unwrap();
                             engine.reset();
                             let session_engine = Arc::clone(engine);
 
-                            // Signal UI to show
                             gui_control_tx.send(GuiControl::SetListening).map_err(|e| {
                                 anyhow::anyhow!("Failed to send SetListening: {}", e)
                             })?;
 
-                            // Create session
                             session = Some(RecordingSession {
                                 start_time: Instant::now(),
                                 engine: Arc::clone(&session_engine),
                             });
 
-                            // Reset cancellation flag for new session
                             let _ = cancel_tx.send(false);
 
-                            // Notify for waking preview task when new audio arrives
                             let audio_notify = Arc::new(tokio::sync::Notify::new());
 
-                            // Start audio processing task
                             let engine_clone = Arc::clone(&session_engine);
                             let spectrum_tx_clone = spectrum_tx.clone();
                             let audio_rx_clone = Arc::clone(&audio_rx_shared);
@@ -1337,7 +1190,6 @@ pub async fn run() -> Result<()> {
                                 let mut trailing_deadline: Option<tokio::time::Instant> = None;
 
                                 loop {
-                                    // Check if trailing period has elapsed FIRST
                                     if let Some(deadline) = trailing_deadline {
                                         if tokio::time::Instant::now() >= deadline {
                                             debug!("Audio task: trailing capture complete");
@@ -1345,7 +1197,6 @@ pub async fn run() -> Result<()> {
                                         }
                                     }
 
-                                    // Use select to allow graceful cancellation
                                     tokio::select! {
                                         biased;
                                         _ = cancel_rx.changed() => {
@@ -1360,7 +1211,6 @@ pub async fn run() -> Result<()> {
                                         } => {
                                             match samples {
                                                 Some(samples) => {
-                                                    // Update health timestamp
                                                     let now_ms = std::time::SystemTime::now()
                                                         .duration_since(std::time::UNIX_EPOCH)
                                                         .unwrap_or_default()
@@ -1384,16 +1234,12 @@ pub async fn run() -> Result<()> {
                                                 None => break,
                                             }
                                         }
-                                        _ = tokio::time::sleep(Duration::from_millis(10)), if trailing_deadline.is_some() => {
-                                            // Periodic wake-up during trailing period to check deadline
-                                        }
+                                        _ = tokio::time::sleep(Duration::from_millis(10)), if trailing_deadline.is_some() => {}
                                     }
                                 }
                                 debug!("Audio task: exiting gracefully");
                             }));
 
-                            // Start preview task (consumes the engine's event stream).
-                            // Subscribe before spawning so no early partials are missed.
                             let mut event_rx = session_engine.subscribe();
                             let gui_control_tx_preview = gui_control_tx.clone();
                             let preview_stages =
@@ -1405,7 +1251,6 @@ pub async fn run() -> Result<()> {
                             };
                             let mut cancel_rx_preview = cancel_tx.subscribe();
                             preview_task = Some(tokio::spawn(async move {
-                                // Preview drops final-only stages (grammar, llm_correction).
                                 let pipeline = Pipeline::from_stages(
                                     &preview_stages,
                                     &preview_ctx,
@@ -1415,9 +1260,6 @@ pub async fn run() -> Result<()> {
                                 let mut last_text = String::new();
                                 let mut last_text_change = Instant::now();
                                 const TEXT_SETTLED_THRESHOLD_MS: u64 = 300;
-                                // Periodic tick re-evaluates "settled" when no new partials
-                                // arrive (e.g. the user stopped speaking), mirroring the old
-                                // 200ms poll cadence.
                                 let mut settle_tick =
                                     tokio::time::interval(Duration::from_millis(200));
 
@@ -1463,7 +1305,6 @@ pub async fn run() -> Result<()> {
                                                         text_settled,
                                                     });
                                                 }
-                                                // Final is finalized by the Processing state; ignore here.
                                                 Some(TranscriptEvent::Final(_)) => {}
                                                 Some(TranscriptEvent::Error(e)) => {
                                                     error!("Preview: engine error: {}", e);
@@ -1475,7 +1316,6 @@ pub async fn run() -> Result<()> {
                                             }
                                         }
                                         _ = settle_tick.tick() => {
-                                            // No new text; re-evaluate settled state only.
                                             let text_settled = last_text_change.elapsed().as_millis() >= TEXT_SETTLED_THRESHOLD_MS as u128;
                                             let is_speaking = !last_text.is_empty() && !text_settled;
                                             let _ = gui_control_tx_preview.send(GuiControl::UpdateVadState {
@@ -1511,38 +1351,33 @@ pub async fn run() -> Result<()> {
                             break;
                         }
                         #[cfg(feature = "correction")]
-                        DaemonCommand::SnapshotCorrection => {
-                            match last_injection.clone() {
-                                Some(ctx) => {
-                                    // Re-arm the monitoring window against the last injection
-                                    // so edits made after the original window expired are
-                                    // still captured as corrections.
-                                    let context = correction_engine::InjectionContext {
-                                        timestamp: chrono::Utc::now(),
-                                        instant: Instant::now(),
-                                        ..ctx
-                                    };
-                                    let is_wezterm = context.window_class
-                                        == correction_engine::WEZTERM_WINDOW_CLASS;
-                                    match (is_wezterm, &wezterm_monitor, &correction_monitor) {
-                                        (true, Some(monitor), _) => {
-                                            let _handle = monitor.start_monitoring(context);
-                                            info!("Manual snapshot: re-armed wezterm correction monitoring for last injection");
-                                        }
-                                        (_, _, Some(monitor)) => {
-                                            let _handle = monitor.start_monitoring(context);
-                                            info!("Manual snapshot: re-armed correction monitoring for last injection");
-                                        }
-                                        _ => {
-                                            warn!("SnapshotCorrection requested but correction learning is disabled");
-                                        }
+                        DaemonCommand::SnapshotCorrection => match last_injection.clone() {
+                            Some(ctx) => {
+                                let context = correction_engine::InjectionContext {
+                                    timestamp: chrono::Utc::now(),
+                                    instant: Instant::now(),
+                                    ..ctx
+                                };
+                                let is_wezterm =
+                                    context.window_class == correction_engine::WEZTERM_WINDOW_CLASS;
+                                match (is_wezterm, &wezterm_monitor, &correction_monitor) {
+                                    (true, Some(monitor), _) => {
+                                        let _handle = monitor.start_monitoring(context);
+                                        info!("Manual snapshot: re-armed wezterm correction monitoring for last injection");
+                                    }
+                                    (_, _, Some(monitor)) => {
+                                        let _handle = monitor.start_monitoring(context);
+                                        info!("Manual snapshot: re-armed correction monitoring for last injection");
+                                    }
+                                    _ => {
+                                        warn!("SnapshotCorrection requested but correction learning is disabled");
                                     }
                                 }
-                                None => {
-                                    warn!("SnapshotCorrection requested but nothing has been dictated yet");
-                                }
                             }
-                        }
+                            None => {
+                                warn!("SnapshotCorrection requested but nothing has been dictated yet");
+                            }
+                        },
                         _ => {
                             warn!("Ignoring unexpected command in Idle state");
                         }
@@ -1551,14 +1386,11 @@ pub async fn run() -> Result<()> {
                         error!("D-Bus command channel closed");
                         break;
                     }
-                    Err(_) => {
-                        // Timeout - continue loop
-                    }
+                    Err(_) => {}
                 }
             }
 
             DaemonState::Recording => {
-                // Audio health monitoring: check if audio task has crashed
                 if let Some(ref task) = audio_task {
                     if task.is_finished() {
                         error!("Audio task died unexpectedly - recovering to Idle");
@@ -1566,7 +1398,6 @@ pub async fn run() -> Result<()> {
                         *health_state.last_error.write().await =
                             Some("Audio task crashed during recording".to_string());
 
-                        // Clean up
                         audio_task = None;
                         if let Some(task) = preview_task.take() {
                             let _ = cancel_tx.send(true);
@@ -1583,7 +1414,6 @@ pub async fn run() -> Result<()> {
                     }
                 }
 
-                // Check for D-Bus commands while recording (non-blocking)
                 match tokio::time::timeout(Duration::from_millis(100), command_rx.recv()).await {
                     Ok(Some(cmd)) => match cmd {
                         DaemonCommand::Confirm => {
@@ -1594,16 +1424,12 @@ pub async fn run() -> Result<()> {
                         DaemonCommand::StopRecording => {
                             info!("Received StopRecording (cancel)");
 
-                            // 1. Stop audio backends (pause streams)
                             let _ = device_manager.stop();
 
-                            // 2. Flush backend buffers
                             let _ = device_manager.flush();
 
-                            // 3. Signal audio task to start trailing period
                             let _ = cancel_tx.send(true);
 
-                            // 4. Wait for tasks to finish (includes trailing buffer period)
                             if let Some(task) = audio_task.take() {
                                 let _ = task.await;
                             }
@@ -1611,7 +1437,6 @@ pub async fn run() -> Result<()> {
                                 let _ = task.await;
                             }
 
-                            // Hide GUI
                             let _ = gui_control_tx.send(GuiControl::SetHidden);
 
                             session = None;
@@ -1668,9 +1493,7 @@ pub async fn run() -> Result<()> {
                         error!("D-Bus command channel closed");
                         break;
                     }
-                    Err(_) => {
-                        // Timeout - continue recording
-                    }
+                    Err(_) => {}
                 }
             }
 
@@ -1686,24 +1509,18 @@ pub async fn run() -> Result<()> {
                     });
                 }
 
-                // Show the transcribing spinner IMMEDIATELY before any blocking work.
                 gui_control_tx
                     .send(GuiControl::SetTranscribing)
                     .map_err(|e| anyhow::anyhow!("Failed to send SetTranscribing: {}", e))?;
 
-                // From here on, any early return (`?`) must not strand the GUI in Processing.
                 let mut processing_guard = ProcessingGuard::new(gui_control_tx.clone());
 
-                // 1. Stop audio backends (pause streams)
                 let _ = device_manager.stop();
 
-                // 2. Flush backend buffers
                 let _ = device_manager.flush();
 
-                // 3. Signal audio task to start trailing period
                 let _ = cancel_tx.send(true);
 
-                // 4. Wait for audio task to finish (includes trailing buffer period)
                 if let Some(task) = audio_task.take() {
                     let _ = task.await;
                 }
@@ -1711,27 +1528,21 @@ pub async fn run() -> Result<()> {
                     let _ = task.await;
                 }
 
-                // Get engine from session
                 let session_engine = session
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("No active session in Processing state"))?
                     .engine
                     .clone();
 
-                // Check if any audio was captured
                 let audio_buffer_len = session_engine.get_audio_buffer().len();
                 info!("Audio buffer contains {} samples", audio_buffer_len);
 
                 if audio_buffer_len > 0 {
-                    // Finalize: subscribe fresh, signal end-of-utterance, then await the
-                    // Final event (the engine transcribes the full buffer, including
-                    // trailing audio). Replaces the old synchronous get_final_result().
                     let mut final_rx = session_engine.subscribe();
                     session_engine.finish();
                     let preview_text = recv_final_transcript(&mut final_rx).await;
                     info!("Transcription: '{}'", preview_text);
 
-                    // Apply post-processing pipeline
                     let final_stages = config.session_stages(&model_spec, session_engine.as_ref());
                     let final_ctx = StageContext {
                         user_dict: Some(Arc::clone(&user_dict)),
@@ -1746,7 +1557,6 @@ pub async fn run() -> Result<()> {
                         info!("[Final] Processed: '{}'", processed_result);
                     }
 
-                    // Save debug audio if enabled
                     if debug_audio::is_debug_audio_enabled() {
                         let audio_buffer = session_engine.get_audio_buffer();
                         let metadata = debug_audio::AudioMetadata {
@@ -1769,7 +1579,6 @@ pub async fn run() -> Result<()> {
                         }
                     }
 
-                    // Build per-app profile from captured window class
                     let profile = match &window_target {
                         Some(wt) => app_profile::AppProfile::from_window_class(wt.class()),
                         None => app_profile::AppProfile::for_category(
@@ -1781,7 +1590,6 @@ pub async fn run() -> Result<()> {
                         SanitizationProcessor::new(profile.sanitization.clone(), profile.category);
                     let sanitized_result = sanitizer.process(&processed_result)?;
 
-                    // Copy to clipboard as backup (wl-copy for Wayland)
                     match tokio::process::Command::new("wl-copy")
                         .arg(&sanitized_result)
                         .stdin(std::process::Stdio::null())
@@ -1797,7 +1605,6 @@ pub async fn run() -> Result<()> {
                         }
                     }
 
-                    // Refocus original window before typing (handles window switches during recording)
                     if let Some(ref wt) = window_target {
                         wt.refocus().await.ok();
                     }
@@ -1811,9 +1618,6 @@ pub async fn run() -> Result<()> {
                         "Typing final text ({:?} mode, delay={}ms)...",
                         profile.category, profile.word_delay_ms
                     );
-                    // Switch the overlay to Typing and stream word-count progress. Throttle to
-                    // ~50 updates so we never flood the broadcast channel, but always emit the
-                    // final (done == total) update. This progress doubles as a liveness signal.
                     let typing_tx = gui_control_tx.clone();
                     let mut last_sent = 0usize;
                     keyboard
@@ -1831,7 +1635,6 @@ pub async fn run() -> Result<()> {
                         .await?;
                     info!("Typed!");
 
-                    // Start correction monitoring (background task, non-blocking)
                     #[cfg(feature = "correction")]
                     {
                         let context = correction_engine::InjectionContext {
@@ -1845,8 +1648,6 @@ pub async fn run() -> Result<()> {
                             window_title: String::new(),
                         };
                         last_injection = Some(context.clone());
-                        // wezterm is invisible to AT-SPI2 — route injections
-                        // targeting it to the wezterm-native backend instead.
                         let is_wezterm =
                             context.window_class == correction_engine::WEZTERM_WINDOW_CLASS;
                         match (is_wezterm, &wezterm_monitor, &correction_monitor) {
@@ -1868,7 +1669,6 @@ pub async fn run() -> Result<()> {
                         }
                     }
 
-                    // Send to GUI via channel
                     gui_control_tx
                         .send(GuiControl::SetClosing)
                         .map_err(|e| anyhow::anyhow!("Failed to send SetClosing: {}", e))?;
@@ -1882,13 +1682,11 @@ pub async fn run() -> Result<()> {
                     tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
                 }
 
-                // Hide GUI and return to Idle
                 gui_control_tx
                     .send(GuiControl::SetHidden)
                     .map_err(|e| anyhow::anyhow!("Failed to send SetHidden: {}", e))?;
                 processing_guard.disarm();
 
-                // Stop audio capture (streams paused but kept alive for next session)
                 let _ = device_manager.stop();
 
                 session = None;
@@ -1909,7 +1707,6 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-/// Result of running one recording through an engine and its stage chain.
 #[derive(Debug)]
 pub struct FileTranscription {
     pub model: String,
@@ -1917,21 +1714,11 @@ pub struct FileTranscription {
     pub raw: String,
     pub processed: String,
     pub partials: usize,
-    /// Time from the first audio sent to the first partial transcript.
     pub first_partial_ms: Option<u128>,
-    /// Time from end of audio (`finish()`) to the final transcript.
     pub final_ms: u128,
     pub audio_secs: f32,
 }
 
-/// Run a 16 kHz mono PCM16 WAV through the configured engine (or
-/// `model_override`) and the same resolved stage chain the daemon uses.
-///
-/// `stages_override` replaces the `[pipeline]` entry for this run, using the
-/// same comma-separated syntax.
-///
-/// With `paced`, audio is fed at speaking speed in 100 ms chunks, so partial
-/// and final timings match live dictation. Without it, audio is fed at once.
 pub async fn transcribe_file(
     wav: &std::path::Path,
     model_override: Option<&str>,
@@ -2026,8 +1813,6 @@ pub async fn transcribe_file(
 mod config_tests {
     use super::*;
 
-    /// A pre-pipeline config (only `[daemon]`) must parse and keep the exact
-    /// legacy stage chain for Parakeet.
     #[test]
     fn legacy_config_parses_and_keeps_local_chain() {
         let cfg: Config = toml::from_str(
@@ -2052,8 +1837,6 @@ mod config_tests {
         assert_eq!(cfg.openai.delay, "low");
     }
 
-    /// The shape the schema TUI writes: every field present, defaults as
-    /// strings ("default", "").
     #[test]
     fn tui_written_config_parses() {
         let cfg: Config = toml::from_str(
@@ -2084,11 +1867,9 @@ mod config_tests {
             "#,
         )
         .unwrap();
-        // OpenAI declares no stages, and "default" keeps that.
         let stages =
             resolve_stages(&[], cfg.pipeline.for_provider(Provider::OpenAi), cfg.stage_switches());
         assert!(stages.is_empty());
-        // Grammar switch is global: off for Parakeet too.
         let local = resolve_stages(
             post_processing::LOCAL_MODEL_STAGES,
             cfg.pipeline.for_provider(Provider::Parakeet),
@@ -2100,8 +1881,6 @@ mod config_tests {
         assert_eq!(opts.languages, vec!["en"]);
     }
 
-    /// The repository schema must keep parsing and must cover every config
-    /// section the daemon reads, or a TUI save would drop that section.
     #[test]
     fn schema_covers_all_config_sections() {
         let schema: serde_json::Value =

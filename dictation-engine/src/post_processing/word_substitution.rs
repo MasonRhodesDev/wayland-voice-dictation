@@ -5,36 +5,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-/// Word substitution post-processor.
-///
-/// Maps spoken phrases to desired output text (e.g., "shay moy" → "chezmoi").
-/// Substitutions are loaded from `~/.local/share/voice-dictation/substitutions.txt`.
-///
-/// File format:
-/// ```text
-/// # Comments start with #
-/// shay moy -> chezmoi
-/// cube cuttle -> kubectl
-/// ```
 #[derive(Clone)]
 pub struct WordSubstitutionProcessor {
-    /// Substitution entries: (spoken words split into vec, replacement string).
-    /// Sorted by descending spoken-form word count (longest match first).
     #[allow(clippy::type_complexity)]
     entries: Arc<RwLock<Vec<(Vec<String>, String)>>>,
-    /// Optional user dictionary to register replacement words with.
     user_dict: Option<Arc<UserDictionary>>,
 }
 
 impl WordSubstitutionProcessor {
-    /// Create a new word substitution processor, loading from the default substitutions file.
-    ///
-    /// Replacement words are added to the user dictionary so grammar checking won't flag them.
     pub fn new(user_dict: Option<Arc<UserDictionary>>) -> Result<Self> {
         let path = Self::get_substitutions_path()?;
         let entries = Self::load_substitutions(&path)?;
 
-        // Register replacement words in user dictionary
         if let Some(ref dict) = user_dict {
             for (_, replacement) in &entries {
                 for word in replacement.split_whitespace() {
@@ -46,17 +28,14 @@ impl WordSubstitutionProcessor {
         Ok(Self { entries: Arc::new(RwLock::new(entries)), user_dict })
     }
 
-    /// Create an empty processor with no substitutions (fallback).
     pub fn empty() -> Self {
         Self { entries: Arc::new(RwLock::new(Vec::new())), user_dict: None }
     }
 
-    /// Reload substitutions from disk and re-sync to user dictionary.
     pub fn reload(&self) -> Result<()> {
         let path = Self::get_substitutions_path()?;
         let new_entries = Self::load_substitutions(&path)?;
 
-        // Register replacement words in user dictionary
         if let Some(ref dict) = self.user_dict {
             for (_, replacement) in &new_entries {
                 for word in replacement.split_whitespace() {
@@ -71,19 +50,16 @@ impl WordSubstitutionProcessor {
         Ok(())
     }
 
-    /// Returns the file path for the substitutions file (for the watcher).
     pub fn watch_path() -> PathBuf {
         Self::get_substitutions_path().unwrap_or_default()
     }
 
-    /// Returns the path to the substitutions file.
     pub fn get_substitutions_path() -> Result<PathBuf> {
         let data_dir = dirs::data_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?;
 
         let path = data_dir.join("voice-dictation").join("substitutions.txt");
 
-        // Ensure directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -91,9 +67,6 @@ impl WordSubstitutionProcessor {
         Ok(path)
     }
 
-    /// Parse a substitutions file.
-    ///
-    /// Returns entries sorted by descending spoken-form word count (longest match first).
     pub fn load_substitutions(path: &Path) -> Result<Vec<(Vec<String>, String)>> {
         if !path.exists() {
             return Ok(Vec::new());
@@ -120,7 +93,6 @@ impl WordSubstitutionProcessor {
             })
             .collect();
 
-        // Sort by descending spoken-form word count (longest match first)
         entries.sort_by_key(|e| std::cmp::Reverse(e.0.len()));
 
         Ok(entries)
@@ -146,14 +118,12 @@ impl TextProcessor for WordSubstitutionProcessor {
         while i < words.len() {
             let mut matched = false;
 
-            // Try each substitution entry (longest first due to sorting)
             for (spoken_words, replacement) in entries.iter() {
                 let len = spoken_words.len();
                 if i + len > words.len() {
                     continue;
                 }
 
-                // Case-insensitive comparison
                 let is_match = words[i..i + len]
                     .iter()
                     .zip(spoken_words.iter())
@@ -192,7 +162,6 @@ mod tests {
                 (words, replacement.to_string())
             })
             .collect();
-        // Sort by descending word count
         let mut entries = entries;
         entries.sort_by_key(|e| std::cmp::Reverse(e.0.len()));
 
@@ -230,7 +199,6 @@ mod tests {
     #[test]
     fn test_no_false_positives_on_partial_match() {
         let processor = make_processor(vec![("shay moy", "chezmoi")]);
-        // "shay" alone should NOT trigger the substitution
         let result = processor.process("shay is a name").unwrap();
         assert_eq!(result, "shay is a name");
     }
@@ -252,7 +220,6 @@ mod tests {
     #[test]
     fn test_longest_match_first() {
         let processor = make_processor(vec![("ch ez moy", "chezmoi"), ("ch ez", "chez")]);
-        // "ch ez moy" should match first (3 words) over "ch ez" (2 words)
         let result = processor.process("run ch ez moy now").unwrap();
         assert_eq!(result, "run chezmoi now");
     }
@@ -274,15 +241,12 @@ mod tests {
 
         let entries = WordSubstitutionProcessor::load_substitutions(file.path()).unwrap();
 
-        // Should have 3 valid entries (malformed/empty lines skipped)
         assert_eq!(entries.len(), 3);
 
-        // Should be sorted by descending word count
-        assert_eq!(entries[0].0.len(), 3); // "ch ez moy"
-        assert_eq!(entries[1].0.len(), 2); // "shay moy" or "cube cuttle"
+        assert_eq!(entries[0].0.len(), 3);
+        assert_eq!(entries[1].0.len(), 2);
         assert_eq!(entries[2].0.len(), 2);
 
-        // Verify content
         assert_eq!(entries[0].1, "chezmoi");
     }
 

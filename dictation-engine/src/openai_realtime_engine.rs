@@ -1,24 +1,3 @@
-//! Hosted OpenAI realtime transcription engine (streaming).
-//!
-//! Selected with a realtime model spec such as `openai:gpt-live-transcribe`.
-//! Each utterance opens one WebSocket transcription session:
-//!
-//! 1. The first captured audio opens the connection and sends `session.update`
-//!    (model, `keywords`, `prompt`, `languages`, `delay`, no server VAD).
-//! 2. Audio is resampled to 24 kHz PCM16, batched into ~100 ms frames, and
-//!    sent as `input_audio_buffer.append`.
-//! 3. Transcript deltas are accumulated and pushed as
-//!    [`TranscriptEvent::Partial`], so the overlay shows text while you speak.
-//! 4. `finish()` sends `input_audio_buffer.commit`; the `completed` event
-//!    becomes [`TranscriptEvent::Final`].
-//!
-//! **Fallback.** Every captured sample is also kept locally. If the stream
-//! fails at any point (connect, protocol error, server error, timeout), the
-//! engine waits for `finish()` and then transcribes the full buffer once with
-//! the batch [`FALLBACK_MODEL`], so the utterance is never lost. The fallback
-//! stays inside the same provider and uses the same key: no cross-engine
-//! switching.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,17 +15,12 @@ use crate::openai_engine::{self, OpenAiOptions};
 use crate::post_processing::Stage;
 use crate::stream_engine::{EngineError, EventStream, StreamingEngine, TranscriptEvent};
 
-/// Sample rate the realtime session is configured for.
 const REALTIME_RATE: u32 = 24_000;
-/// Send audio in frames of about 100 ms.
 const FRAME_SAMPLES: usize = (REALTIME_RATE / 10) as usize;
-/// Batch model used when the stream fails.
 pub const FALLBACK_MODEL: &str = "gpt-transcribe";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long to wait for `completed` after the commit before falling back.
 const COMPLETE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Model names served by the realtime engine rather than batch upload.
 pub fn is_realtime_model(model: &str) -> bool {
     model.starts_with("gpt-live-transcribe") || model.contains("realtime")
 }
@@ -94,7 +68,6 @@ impl OpenAiRealtimeEngine {
         }
     }
 
-    /// Start the per-utterance session task if none is running.
     fn ensure_session(&self) -> Option<mpsc::UnboundedSender<SessionMsg>> {
         let mut slot = self.session.lock().ok()?;
         if let Some(s) = slot.as_ref() {
@@ -206,12 +179,11 @@ async fn session_task(ctx: SessionCtx, mut rx: mpsc::UnboundedReceiver<SessionMs
         Ok(transcript) => TranscriptEvent::Final(transcript),
         Err(e) => {
             warn!("realtime transcription failed ({e:#}); falling back to batch {FALLBACK_MODEL}");
-            // Keep consuming until the utterance ends; the buffer holds the audio.
             while !ctx.commit_requested.load(Ordering::SeqCst) {
                 match rx.recv().await {
                     Some(SessionMsg::Commit) => break,
                     Some(SessionMsg::Audio(_)) => {}
-                    None => return, // reset or drop: nothing to finalize
+                    None => return,
                 }
             }
             let audio = ctx.buffer.lock().map(|b| b.clone()).unwrap_or_default();
@@ -238,7 +210,6 @@ async fn session_task(ctx: SessionCtx, mut rx: mpsc::UnboundedReceiver<SessionMs
     emit(&ctx.event_tx, event);
 }
 
-/// The session.update payload for a transcription session.
 fn session_update(model: &str, options: &OpenAiOptions) -> serde_json::Value {
     let mut transcription = serde_json::json!({ "model": model, "delay": options.delay });
     if openai_engine::supports_prompt(model) {
@@ -281,7 +252,6 @@ fn append_event(pcm: &[i16]) -> String {
     .to_string()
 }
 
-/// Run one streaming session to completion. Returns the final transcript.
 async fn stream_session(
     ctx: &SessionCtx,
     rx: &mut mpsc::UnboundedReceiver<SessionMsg>,
@@ -368,14 +338,10 @@ async fn stream_session(
     }
 }
 
-/// Streaming linear-interpolation resampler for mono PCM16. Continuous across
-/// `push` calls; upsampling speech from 16 kHz to 24 kHz needs nothing fancier.
 struct Resampler {
     step: f64,
-    /// Absolute input index of `history[0]`.
     offset: u64,
     history: Vec<i16>,
-    /// Absolute output index of the next sample to produce.
     next_out: u64,
 }
 
@@ -403,7 +369,6 @@ impl Resampler {
             out.push((a + (b - a) * frac).round() as i16);
             self.next_out += 1;
         }
-        // Drop input that no future output sample can reference.
         let keep_from = (self.next_out as f64 * self.step).floor() as u64;
         if keep_from > self.offset {
             let drop = (keep_from - self.offset) as usize;
@@ -418,9 +383,6 @@ impl Resampler {
 mod tests {
     use super::*;
 
-    /// tokio-tungstenite builds its TLS config with `ClientConfig::builder()`,
-    /// which panics unless rustls can pick a single crypto provider from its
-    /// features. This fails the build instead of the first wss:// connect.
     #[test]
     fn rustls_has_a_default_crypto_provider() {
         let _ = rustls::ClientConfig::builder();
@@ -443,7 +405,6 @@ mod tests {
         let b: Vec<i16> = input.chunks(137).flat_map(|c| chunked.push(c)).collect();
         assert_eq!(a, b);
         assert!((a.len() as i64 - 24_000).abs() <= 2, "got {}", a.len());
-        // Every third output sample lands exactly on an input sample.
         assert_eq!(a[0], input[0]);
         assert_eq!(a[3], input[2]);
         assert_eq!(a[300], input[200]);
@@ -468,8 +429,6 @@ mod tests {
         assert!(v["session"]["audio"]["input"]["turn_detection"].is_null());
     }
 
-    /// A local mock of the realtime server: checks the protocol order, sends
-    /// deltas and a completed event, and the engine emits partials then Final.
     #[tokio::test]
     async fn streams_partials_then_final_against_mock_server() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -519,7 +478,7 @@ mod tests {
         );
         let mut rx = engine.subscribe();
         for _ in 0..10 {
-            engine.process_audio(&[100i16; 1600]).unwrap(); // 10 x 100 ms
+            engine.process_audio(&[100i16; 1600]).unwrap();
         }
         let mut partials = Vec::new();
         while partials.len() < 2 {
@@ -537,8 +496,6 @@ mod tests {
         assert!(server.await.unwrap() >= 9);
     }
 
-    /// Minimal HTTP server that answers one request with a JSON transcript and
-    /// reports whether the request carried the expected multipart fields.
     async fn mock_batch_server() -> (String, JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -576,12 +533,9 @@ mod tests {
         (url, handle)
     }
 
-    /// The realtime endpoint is unreachable: the engine must still produce a
-    /// Final by uploading the buffered audio to the batch endpoint.
     #[tokio::test]
     async fn falls_back_to_batch_when_stream_fails() {
         let (batch_url, batch) = mock_batch_server().await;
-        // Bind then drop a listener so the port refuses connections.
         let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dead_addr = dead.local_addr().unwrap();
         drop(dead);
@@ -612,7 +566,6 @@ mod tests {
         assert!(request.to_lowercase().contains("authorization: bearer test-key"));
     }
 
-    /// Reset before finish drops the session without emitting anything.
     #[tokio::test]
     async fn reset_discards_the_session() {
         let opts = OpenAiOptions {
@@ -626,7 +579,6 @@ mod tests {
         engine.process_audio(&[1i16; 1600]).unwrap();
         engine.reset();
         assert!(engine.get_audio_buffer().is_empty());
-        // The old subscription is dropped by reset, so the stream ends.
         assert!(tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap().is_none());
     }
 }

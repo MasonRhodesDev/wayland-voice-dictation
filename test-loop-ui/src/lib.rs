@@ -33,7 +33,6 @@ pub fn run(recording_path: Option<&str>) -> Result<()> {
     let ui = TestLoop::new().context("creating Slint window")?;
     let ui_weak = ui.as_weak();
 
-    // Populate picker with initial recording info
     {
         let recs = recordings.lock().unwrap();
         let count = recs.len() as i32;
@@ -44,7 +43,6 @@ pub fn run(recording_path: Option<&str>) -> Result<()> {
         }
     }
 
-    // Navigate callback
     {
         let recordings = Arc::clone(&recordings);
         let current_index = Arc::clone(&current_index);
@@ -69,7 +67,6 @@ pub fn run(recording_path: Option<&str>) -> Result<()> {
         });
     }
 
-    // Load recording callback
     {
         let recordings = Arc::clone(&recordings);
         let current_index = Arc::clone(&current_index);
@@ -89,7 +86,6 @@ pub fn run(recording_path: Option<&str>) -> Result<()> {
         });
     }
 
-    // Select word callback
     {
         let ui_weak = ui_weak.clone();
         let loaded_recording = Arc::clone(&loaded_recording);
@@ -98,7 +94,6 @@ pub fn run(recording_path: Option<&str>) -> Result<()> {
             if let Some(rec) = rec_guard.as_ref() {
                 let words: Vec<&str> = rec.metadata.final_text.split_whitespace().collect();
                 let raw_word = words.get(word_idx as usize).copied().unwrap_or("").to_string();
-                // Strip leading/trailing punctuation so hotwords and substitutions are clean
                 let clean = raw_word.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_selected_word_index(word_idx);
@@ -111,7 +106,6 @@ pub fn run(recording_path: Option<&str>) -> Result<()> {
         });
     }
 
-    // Re-run engine callback
     {
         let loaded_recording = Arc::clone(&loaded_recording);
         let ui_weak = ui_weak.clone();
@@ -136,7 +130,6 @@ pub fn run(recording_path: Option<&str>) -> Result<()> {
         });
     }
 
-    // Add substitution callback
     {
         let ui_weak = ui_weak.clone();
         ui.on_add_substitution(move |spoken, replacement| {
@@ -157,7 +150,6 @@ pub fn run(recording_path: Option<&str>) -> Result<()> {
         });
     }
 
-    // Add hotword callback
     {
         let ui_weak = ui_weak.clone();
         ui.on_add_hotword(move |word, score| {

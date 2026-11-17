@@ -1,6 +1,4 @@
 #!/bin/bash
-# Download the Parakeet TDT 0.6b ONNX model from HuggingFace
-# Used as a standalone alternative to: voice-dictation download-model
 
 set -euo pipefail
 

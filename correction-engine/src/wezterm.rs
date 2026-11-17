@@ -1,61 +1,3 @@
-//! wezterm-native correction detection backend.
-//!
-//! AT-SPI2 cannot see wezterm at all (wezterm has no accessibility
-//! implementation upstream), but wezterm's mux CLI gives full read access to
-//! pane contents: `wezterm cli list --format json` for pane metadata and
-//! `wezterm cli get-text --pane-id N` for the rendered text (no ANSI escapes
-//! by default). This module snapshots the focused pane right after text
-//! injection, then polls the pane text for the monitoring window and diffs
-//! revisions of the injected span to extract [`CorrectionPair`] records into
-//! the shared [`CorrectionStore`].
-//!
-//! # How it works
-//!
-//! 1. **Socket discovery**: as a systemd user service the daemon does not
-//!    inherit `WEZTERM_UNIX_SOCKET`, so we scan
-//!    `$XDG_RUNTIME_DIR/wezterm/gui-sock-*`, probe each socket with a real
-//!    `connect()` (stale sockets refuse), and pick the most recently modified
-//!    live one. All CLI invocations pass `--no-auto-start` so a stale or
-//!    missing socket can never cause us to spawn a `wezterm-mux-server`.
-//! 2. **Span location**: the injected text is tokenized on whitespace and the
-//!    token sequence is searched in the pane text (last occurrence wins, since
-//!    the freshest prompt is at the bottom). Terminal reflow can hard-wrap a
-//!    word across a line boundary, so the matcher tolerates one injected token
-//!    being split across multiple consecutive pane tokens.
-//! 3. **Revision diffing**: every ~2s the pane text is re-fetched and a
-//!    token-level LCS diff against the baseline snapshot is computed. Change
-//!    regions overlapping the injected span are converted into synthetic
-//!    insert/delete [`TextChangeEvent`]s and fed through the existing
-//!    [`crate::diff::extract_corrections`] machinery, so pair extraction,
-//!    append/prepend skipping and word-level insert handling behave exactly
-//!    like the AT-SPI backend. Recording goes through
-//!    [`CorrectionStore::record_correction`], respecting the blocklist and
-//!    aging rules.
-//!
-//! # Honest limitations
-//!
-//! This is a heuristic, scrollback-based backend — it observes rendered cells,
-//! not an editing buffer:
-//!
-//! - **Multiline prompts and TUIs** (nvim inside wezterm, fzf, etc.) redraw
-//!   the whole screen and reflow arbitrarily. We detect this as diff churn
-//!   (most of the pane changed) or as failure to locate the injected span, and
-//!   bail out with a log line instead of recording garbage pairs.
-//! - **Readline editing** shows up as a full-line rewrite between two polls,
-//!   not as discrete insert/delete events. The token-level LCS isolates the
-//!   changed words, so word-level pairs are still extracted where possible,
-//!   but character-precise edit positions are lost.
-//! - **Hard wrapping** is only heuristically undone: a token split across a
-//!   line boundary is re-joined during matching, but the baseline span text
-//!   (used for correction context) keeps the pane's rendition.
-//! - **Scroll-out**: once the injected text scrolls out of the viewport the
-//!   whole span appears deleted. This is detected (`SpanLost`) and monitoring
-//!   ends with whatever the last good poll saw, rather than recording a bogus
-//!   "everything was deleted" pair.
-//! - **Focused-pane inference**: `wezterm cli list` marks the active pane per
-//!   tab, not the globally focused one, so the injected text itself is used to
-//!   confirm which candidate pane received the injection.
-
 use crate::store::CorrectionStore;
 use crate::types::{
     CorrectionPair, InjectionContext, MonitorConfig, TextChangeEvent, TextChangeOp,
@@ -69,57 +11,26 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-/// Hyprland window class of wezterm — used by the daemon to route injections
-/// to this backend instead of the AT-SPI monitor.
 pub const WEZTERM_WINDOW_CLASS: &str = "org.wezfurlong.wezterm";
 
-/// How often the pane text is re-fetched during the monitoring window.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Timeout for a single `wezterm cli` invocation.
 const CLI_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Consecutive failed/churny polls before we give up on the window.
 const MAX_CONSECUTIVE_BAD_POLLS: u32 = 3;
 
-/// If more than this fraction of the baseline tokens changed in one poll,
-/// treat it as a full-screen redraw (TUI) rather than an edit.
 const CHURN_FRACTION: f64 = 0.5;
 
-/// Churn detection only kicks in above this many baseline tokens, so tiny
-/// panes with a single prompt line don't trip it.
 const CHURN_MIN_TOKENS: usize = 20;
 
-/// Diff inputs larger than this (tokens, after prefix/suffix trimming) are
-/// treated as churn instead of running a quadratic LCS.
 const MAX_DIFF_TOKENS: usize = 3000;
 
-/// Distinctive shell-prompt glyphs. When dictated text is executed at a shell
-/// prompt, its line is replaced by a prompt echo (e.g. `❯ cmd`) and the pane
-/// fills with command output — not an in-place text edit. These Powerline /
-/// Nerd-font glyphs never occur in dictated natural language, so their
-/// appearance inside the injected span marks shell activity, not a correction.
-/// (Plain `$`/`#`/`>` prompts are intentionally excluded: they legitimately
-/// occur in dictated code and prose, and would cause false positives.)
 const PROMPT_MARKERS: &[char] = &['❯', '➜', '➤', '»', '▶', 'λ', '⟩', '❭'];
 
-/// Whether `s` contains a distinctive shell-prompt glyph.
 fn contains_prompt_marker(s: &str) -> bool {
     s.chars().any(|c| PROMPT_MARKERS.contains(&c))
 }
 
-// ---------------------------------------------------------------------------
-// Socket discovery
-// ---------------------------------------------------------------------------
-
-/// Find a live wezterm GUI mux socket.
-///
-/// Preference order:
-/// 1. `WEZTERM_UNIX_SOCKET` if set and live (covers running inside wezterm).
-/// 2. The most recently modified live `gui-sock-*` under
-///    `$XDG_RUNTIME_DIR/wezterm/` (covers the systemd-user-service case where
-///    the env var is not inherited). Stale sockets from crashed instances are
-///    skipped because they refuse connections.
 pub fn discover_socket() -> Option<PathBuf> {
     if let Ok(env_sock) = std::env::var("WEZTERM_UNIX_SOCKET") {
         let path = PathBuf::from(env_sock);
@@ -155,18 +66,10 @@ pub fn discover_socket() -> Option<PathBuf> {
     chosen
 }
 
-/// A socket is live iff something is accepting connections on it.
-/// Unix-domain connects resolve immediately (success or ECONNREFUSED),
-/// so a blocking probe is fine.
 fn socket_is_live(path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
-// ---------------------------------------------------------------------------
-// wezterm CLI client
-// ---------------------------------------------------------------------------
-
-/// Subset of `wezterm cli list --format json` we care about.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaneEntry {
     pub pane_id: u64,
@@ -178,9 +81,6 @@ pub struct PaneEntry {
     pub workspace: String,
 }
 
-/// Abstraction over the wezterm mux so the monitor is testable without a live
-/// wezterm.
-// async_trait marks the boxed future #[must_use]; newer clippy flags that as double.
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait WeztermClient: Send + Sync {
@@ -188,19 +88,15 @@ pub trait WeztermClient: Send + Sync {
     async fn get_text(&self, pane_id: u64) -> Result<String>;
 }
 
-/// Production client that shells out to `wezterm cli --no-auto-start` with an
-/// explicitly discovered socket.
 pub struct WeztermCli {
     socket: PathBuf,
 }
 
 impl WeztermCli {
-    /// Discover a live socket; `None` if no wezterm GUI instance is running.
     pub fn discover() -> Option<Self> {
         discover_socket().map(|socket| Self { socket })
     }
 
-    /// Use an explicit socket path (must already be validated by the caller).
     pub fn with_socket(socket: PathBuf) -> Self {
         Self { socket }
     }
@@ -245,11 +141,6 @@ impl WeztermClient for WeztermCli {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pure text machinery: normalization, span location, revision diffing
-// ---------------------------------------------------------------------------
-
-/// A token range (`[start, end)`) within a tokenized pane snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,
@@ -266,15 +157,10 @@ impl Span {
     }
 }
 
-/// Whitespace-normalize into tokens. This is what makes matching survive
-/// terminal soft-wrapping and the trailing-space padding `get-text` emits.
 pub fn tokenize(text: &str) -> Vec<String> {
     text.split_whitespace().map(str::to_string).collect()
 }
 
-/// Try to match all of `needle` starting at `haystack[pos]`, tolerating a
-/// needle token being hard-wrapped across consecutive haystack tokens.
-/// Returns the exclusive haystack end index on success.
 fn match_needle_at(haystack: &[String], pos: usize, needle: &[String]) -> Option<usize> {
     let mut h = pos;
     for n in needle {
@@ -285,8 +171,6 @@ fn match_needle_at(haystack: &[String], pos: usize, needle: &[String]) -> Option
             h += 1;
             continue;
         }
-        // Hard-wrap tolerance: the needle token may have been split across
-        // line boundaries into several consecutive pane tokens.
         let mut acc = String::new();
         let mut j = h;
         loop {
@@ -307,9 +191,6 @@ fn match_needle_at(haystack: &[String], pos: usize, needle: &[String]) -> Option
     Some(h)
 }
 
-/// Locate the *last* occurrence of the injected token sequence in the pane.
-/// Last occurrence because the injection lands at the freshest prompt (bottom
-/// of the pane), while shell echo / scrollback may contain older copies.
 pub fn locate_span(haystack: &[String], needle: &[String]) -> Option<Span> {
     if needle.is_empty() || haystack.is_empty() {
         return None;
@@ -322,8 +203,6 @@ pub fn locate_span(haystack: &[String], needle: &[String]) -> Option<Span> {
     None
 }
 
-/// A contiguous change between two token sequences:
-/// `a[a_start..a_end]` was replaced by `b[b_start..b_end]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiffRegion {
     a_start: usize,
@@ -332,15 +211,11 @@ struct DiffRegion {
     b_end: usize,
 }
 
-/// Token-level diff via common prefix/suffix trimming + LCS on the middle.
-/// Returns `None` if the middle is too large to diff (treated as churn).
 fn token_diff(a: &[String], b: &[String]) -> Option<Vec<DiffRegion>> {
-    // Trim common prefix
     let mut prefix = 0;
     while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
         prefix += 1;
     }
-    // Trim common suffix
     let mut suffix = 0;
     while suffix < a.len() - prefix
         && suffix < b.len() - prefix
@@ -359,7 +234,6 @@ fn token_diff(a: &[String], b: &[String]) -> Option<Vec<DiffRegion>> {
         return None;
     }
 
-    // LCS DP over the middle
     let n = am.len();
     let m = bm.len();
     let mut dp = vec![0u32; (n + 1) * (m + 1)];
@@ -374,10 +248,9 @@ fn token_diff(a: &[String], b: &[String]) -> Option<Vec<DiffRegion>> {
         }
     }
 
-    // Backtrack, emitting maximal unmatched regions
     let mut regions = Vec::new();
     let (mut i, mut j) = (0usize, 0usize);
-    let (mut ra, mut rb) = (0usize, 0usize); // region start candidates
+    let (mut ra, mut rb) = (0usize, 0usize);
     let mut in_region = false;
     while i < n || j < m {
         if i < n && j < m && am[i] == bm[j] {
@@ -416,34 +289,18 @@ fn token_diff(a: &[String], b: &[String]) -> Option<Vec<DiffRegion>> {
     Some(regions)
 }
 
-/// Outcome of diffing one polled revision against the baseline snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RevisionOutcome {
-    /// Correction pairs extracted (possibly empty: nothing relevant changed).
     Corrections(Vec<CorrectionPair>),
-    /// The injected span disappeared entirely (scrolled out, cleared, Ctrl-C).
     SpanLost,
-    /// Most of the pane changed at once — a TUI redraw, not an edit.
     Churn,
-    /// The injected text was executed at a shell prompt: a prompt glyph / command
-    /// output replaced the editable text. Never an in-place edit — stop and
-    /// record nothing.
     ShellActivity,
 }
 
-/// Char offset of `token_idx` (relative to `span.start`) within the
-/// space-joined span text.
 fn span_char_offset(baseline: &[String], span: Span, token_idx: usize) -> i32 {
     baseline[span.start..token_idx].iter().map(|t| t.chars().count() as i32 + 1).sum()
 }
 
-/// Diff one revision of the pane against the baseline and extract correction
-/// pairs for changes that fall inside the injected span.
-///
-/// Reuses [`crate::diff::extract_corrections`]: change regions are converted
-/// into synthetic delete/insert [`TextChangeEvent`]s positioned within the
-/// normalized span text, so pairing, boundary-append skipping and word-level
-/// insert handling are identical to the AT-SPI backend.
 pub fn diff_revision(
     baseline: &[String],
     span: Span,
@@ -454,7 +311,6 @@ pub fn diff_revision(
         return RevisionOutcome::Churn;
     };
 
-    // Churn guard: a TUI taking over the pane rewrites nearly everything.
     let changed_baseline: usize = regions.iter().map(|r| r.a_end - r.a_start).sum();
     if baseline.len() >= CHURN_MIN_TOKENS
         && (changed_baseline as f64) / (baseline.len() as f64) > CHURN_FRACTION
@@ -462,7 +318,6 @@ pub fn diff_revision(
         return RevisionOutcome::Churn;
     }
 
-    // Span-lost guard: every span token deleted and nothing inserted in range.
     let mut span_tokens_deleted = 0usize;
     let mut span_tokens_inserted = 0usize;
     for r in &regions {
@@ -477,16 +332,11 @@ pub fn diff_revision(
         return RevisionOutcome::SpanLost;
     }
 
-    // Convert overlapping regions into synthetic events against the
-    // normalized span text.
     let span_text: String = baseline[span.start..span.end].join(" ");
     let now = Instant::now();
     let mut events: Vec<TextChangeEvent> = Vec::new();
 
     for r in &regions {
-        // Overlap test uses a closed range so pure inserts at the span
-        // boundaries are still forwarded — extract_corrections itself skips
-        // pure appends/prepends at the exact edges.
         if r.a_end < span.start || r.a_start > span.end {
             continue;
         }
@@ -496,9 +346,6 @@ pub fn diff_revision(
         let inserted: String = current[r.b_start..r.b_end].join(" ");
         let pos = span_char_offset(baseline, span, ca);
 
-        // A prompt glyph appearing where editable text was means the injected
-        // text was run as a command (its line became a prompt echo). The rest of
-        // the pane is now command output, not an edit — abandon this window.
         if contains_prompt_marker(&inserted) {
             return RevisionOutcome::ShellActivity;
         }
@@ -529,25 +376,12 @@ pub fn diff_revision(
         return RevisionOutcome::Corrections(Vec::new());
     }
 
-    // Positions are relative to the normalized span text, so extraction must
-    // run against that text rather than the raw injected string.
     let span_context = InjectionContext { text: span_text, ..context.clone() };
     let pairs = crate::diff::extract_corrections(&span_context, &events);
     RevisionOutcome::Corrections(pairs)
 }
 
-// ---------------------------------------------------------------------------
-// Monitor
-// ---------------------------------------------------------------------------
-
-/// wezterm-native counterpart of [`crate::CorrectionMonitor`].
-///
-/// Same conceptual lifecycle: [`WeztermMonitor::start_monitoring`] spawns a
-/// detached task that watches the injected text for `monitor_duration_secs`
-/// and records detected [`CorrectionPair`]s into the [`CorrectionStore`].
 pub struct WeztermMonitor {
-    /// `None` means "discover a live socket at monitoring time" — this keeps
-    /// daemon startup independent of wezterm's lifetime.
     client: Option<Arc<dyn WeztermClient>>,
     store: Arc<Mutex<CorrectionStore>>,
     config: MonitorConfig,
@@ -555,7 +389,6 @@ pub struct WeztermMonitor {
 }
 
 impl WeztermMonitor {
-    /// Production constructor with its own store instance.
     pub fn new(config: MonitorConfig) -> Result<Self> {
         let store = CorrectionStore::load(&config)?;
         Ok(Self {
@@ -566,13 +399,10 @@ impl WeztermMonitor {
         })
     }
 
-    /// Production constructor sharing a store with another monitor (avoids
-    /// two in-memory copies of corrections.json clobbering each other).
     pub fn with_shared_store(store: Arc<Mutex<CorrectionStore>>, config: MonitorConfig) -> Self {
         Self { client: None, store, config, poll_interval: DEFAULT_POLL_INTERVAL }
     }
 
-    /// Test constructor with an injected client and store.
     pub fn with_client(
         client: Arc<dyn WeztermClient>,
         store: CorrectionStore,
@@ -590,19 +420,14 @@ impl WeztermMonitor {
         self.poll_interval = interval;
     }
 
-    /// Shared handle to the underlying store, so the daemon can reload it from
-    /// disk when the `corrections` CLI mutates the file externally.
     pub fn store_handle(&self) -> Arc<Mutex<CorrectionStore>> {
         Arc::clone(&self.store)
     }
 
-    /// Whether a live wezterm GUI socket is reachable right now.
     pub fn is_available() -> bool {
         discover_socket().is_some()
     }
 
-    /// Start monitoring the injected text for corrections. Mirrors
-    /// [`crate::CorrectionMonitor::start_monitoring`].
     pub fn start_monitoring(
         &self,
         context: InjectionContext,
@@ -643,7 +468,6 @@ impl WeztermMonitor {
             ),
         };
 
-        // Let the compositor/pane render the freshly typed text.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let Some((pane_id, baseline, span)) =
@@ -694,13 +518,10 @@ impl WeztermMonitor {
                     last_pairs = pairs;
                 }
                 RevisionOutcome::SpanLost => {
-                    // Scrolled out / cleared — later polls can't recover it.
                     debug!("wezterm: injected span no longer visible, ending monitoring");
                     break;
                 }
                 RevisionOutcome::ShellActivity => {
-                    // Injected text was executed at a prompt; any pairs extracted
-                    // before are shell chrome, not edits. Drop and stop.
                     debug!(
                         "wezterm: shell prompt/execution detected in span — \
                          ending monitoring without recording"
@@ -716,9 +537,6 @@ impl WeztermMonitor {
                             "wezterm: persistent pane churn (TUI took over?) — \
                              ending monitoring without recording"
                         );
-                        // Whatever we extracted before the TUI appeared may be
-                        // stale; keep it only if a later poll re-confirmed it,
-                        // which it didn't — so drop.
                         last_pairs.clear();
                         break;
                     }
@@ -747,8 +565,6 @@ impl WeztermMonitor {
         Ok(last_pairs)
     }
 
-    /// Find which pane received the injection: prefer active panes, but
-    /// confirm by actually locating the injected token sequence in the text.
     async fn locate_injection(
         client: &dyn WeztermClient,
         injected_tokens: &[String],
@@ -826,11 +642,8 @@ mod tests {
         }
     }
 
-    // --- tokenize / normalization ---
-
     #[test]
     fn test_tokenize_collapses_whitespace_and_padding() {
-        // get-text pads lines with trailing spaces and terminals soft-wrap
         let text = "hello   world  \n   this is\t a prompt   \n";
         assert_eq!(toks(text), vec!["hello", "world", "this", "is", "a", "prompt"]);
     }
@@ -839,8 +652,6 @@ mod tests {
     fn test_tokenize_empty() {
         assert!(toks("   \n  \t ").is_empty());
     }
-
-    // --- span location ---
 
     #[test]
     fn test_locate_span_simple() {
@@ -852,7 +663,6 @@ mod tests {
 
     #[test]
     fn test_locate_span_prefers_last_occurrence() {
-        // Older copy in scrollback + fresh copy at the prompt
         let hay = toks("hello world output line $ hello world");
         let needle = toks("hello world");
         let span = locate_span(&hay, &needle).unwrap();
@@ -861,13 +671,10 @@ mod tests {
 
     #[test]
     fn test_locate_span_wrapped_word() {
-        // "configuration" hard-wrapped across a line boundary:
-        // pane renders it as "configu" / "ration" on separate lines.
         let hay = toks("$ update the configu\nration file now");
         let needle = toks("update the configuration file");
         let span = locate_span(&hay, &needle).unwrap();
         assert_eq!(span.start, 1);
-        // The wrapped token consumed two haystack tokens.
         assert_eq!(span.end, 6);
     }
 
@@ -891,8 +698,6 @@ mod tests {
         assert!(locate_span(&toks("a b c"), &[]).is_none());
     }
 
-    // --- token_diff ---
-
     #[test]
     fn test_token_diff_identical() {
         let a = toks("a b c");
@@ -915,15 +720,11 @@ mod tests {
         let b = toks("one three four five");
         let regions = token_diff(&a, &b).unwrap();
         assert_eq!(regions.len(), 2);
-        // "two" deleted
         assert_eq!((regions[0].a_start, regions[0].a_end), (1, 2));
         assert_eq!(regions[0].b_start, regions[0].b_end);
-        // "five" appended
         assert_eq!(regions[1].a_start, regions[1].a_end);
         assert_eq!((regions[1].b_start, regions[1].b_end), (3, 4));
     }
-
-    // --- diff_revision → pair extraction ---
 
     #[test]
     fn test_diff_revision_word_replacement() {
@@ -962,7 +763,6 @@ mod tests {
 
     #[test]
     fn test_diff_revision_ignores_new_output_after_span() {
-        // User pressed Enter: new output appears after the injected text.
         let context = make_context("git status");
         let baseline = toks("$ git status");
         let span = locate_span(&baseline, &toks("git status")).unwrap();
@@ -976,7 +776,6 @@ mod tests {
     fn test_contains_prompt_marker() {
         assert!(contains_prompt_marker("❯ thecvlb"));
         assert!(contains_prompt_marker("foo ➜ bar"));
-        // Dictated prose/code must not trip it (plain $ / # / > are excluded).
         assert!(!contains_prompt_marker("the cache is here"));
         assert!(!contains_prompt_marker("$ git status # comment > out"));
         assert!(!contains_prompt_marker("spend $5 on C#"));
@@ -984,9 +783,6 @@ mod tests {
 
     #[test]
     fn test_diff_revision_shell_execution_is_not_a_correction() {
-        // User dictated "the c v l b" at a shell prompt, then pressed Enter. The
-        // span line became a prompt echo of the run command ("❯ thecvlb") — shell
-        // activity, not an in-place edit. This is the exact live-test garbage case.
         let context = make_context("the c v l b");
         let baseline = toks(
             "prev output line one two three four five six \
@@ -1005,8 +801,6 @@ mod tests {
 
     #[test]
     fn test_diff_revision_full_line_rewrite_extracts_word_pair() {
-        // Readline editing rewrites the whole line between polls; the LCS
-        // must still isolate the single changed word.
         let context = make_context("please install the parakeet model today");
         let baseline = toks("$ please install the parakeet model today");
         let span =
@@ -1062,7 +856,6 @@ mod tests {
         let context = make_context("hello world");
         let baseline = toks("old output line one two three $ hello world");
         let span = locate_span(&baseline, &toks("hello world")).unwrap();
-        // Pane cleared to a bare prompt; small pane so churn guard stays out.
         let current = toks("old output line one two three $");
 
         let outcome = diff_revision(&baseline, span, &current, &context);
@@ -1077,7 +870,6 @@ mod tests {
              line6 kk ll line7 mm nn $ hello world",
         );
         let span = locate_span(&baseline, &toks("hello world")).unwrap();
-        // nvim took over: everything replaced
         let current = toks(
             "NORMAL main.rs 1,1 All ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ ~ \
              ~ ~ ~ ~ ~ ~ ~ ~ set nu",
@@ -1090,17 +882,14 @@ mod tests {
     #[test]
     fn test_span_char_offset() {
         let baseline = toks("$ the cash is here");
-        let span = Span { start: 1, end: 5 }; // "the cash is here"
-        assert_eq!(span_char_offset(&baseline, span, 1), 0); // "the"
-        assert_eq!(span_char_offset(&baseline, span, 2), 4); // "cash"
-        assert_eq!(span_char_offset(&baseline, span, 4), 12); // "here"
+        let span = Span { start: 1, end: 5 };
+        assert_eq!(span_char_offset(&baseline, span, 1), 0);
+        assert_eq!(span_char_offset(&baseline, span, 2), 4);
+        assert_eq!(span_char_offset(&baseline, span, 4), 12);
     }
-
-    // --- monitor end-to-end with a scripted client ---
 
     struct MockClient {
         panes: Vec<PaneEntry>,
-        /// Revisions handed out per get_text call; last one repeats.
         revisions: StdMutex<VecDeque<String>>,
         last: StdMutex<String>,
     }
@@ -1109,7 +898,6 @@ mod tests {
         fn new(revisions: Vec<&str>) -> Self {
             let mut queue: VecDeque<String> = revisions.into_iter().map(str::to_string).collect();
             let last = queue.back().cloned().unwrap_or_default();
-            // Keep the last revision out of the queue so it repeats forever.
             if queue.len() > 1 {
                 queue.pop_back();
             }
@@ -1147,12 +935,7 @@ mod tests {
         let config = test_config(dir.path());
         let store = CorrectionStore::empty(config.clone());
 
-        let client = Arc::new(MockClient::new(vec![
-            // Baseline snapshot at injection time
-            "$ the cash is here",
-            // User corrected it
-            "$ the cache is here",
-        ]));
+        let client = Arc::new(MockClient::new(vec!["$ the cash is here", "$ the cache is here"]));
 
         let monitor = WeztermMonitor::with_client(client, store, config);
         let context = make_context("the cash is here");
@@ -1162,7 +945,6 @@ mod tests {
         assert_eq!(pairs[0].original, "cash");
         assert_eq!(pairs[0].corrected, "cache");
 
-        // Recorded into the store (respecting blocklist path)
         let stats = {
             let store = monitor.store.lock().await;
             store.stats()
@@ -1176,7 +958,6 @@ mod tests {
         let config = test_config(dir.path());
         let store = CorrectionStore::empty(config.clone());
 
-        // Pane never shows the injected text (e.g. nvim swallowed it)
         let client = Arc::new(MockClient::new(vec!["NORMAL ~ ~ ~ main.rs"]));
 
         let monitor = WeztermMonitor::with_client(client, store, config);
@@ -1195,7 +976,6 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let config = test_config(dir.path());
         let mut store = CorrectionStore::empty(config.clone());
-        // Reject the pair up-front: record then remove → blocklisted
         store
             .record_correction(CorrectionPair {
                 original: "cash".to_string(),
@@ -1212,17 +992,13 @@ mod tests {
         let monitor = WeztermMonitor::with_client(client, store, config);
         let pairs = monitor.start_monitoring(make_context("the cash is here")).await.unwrap();
 
-        // The pair is still *detected*...
         assert_eq!(pairs.len(), 1);
-        // ...but the blocklist keeps it out of the store.
         let stats = {
             let store = monitor.store.lock().await;
             store.stats()
         };
         assert_eq!(stats.total_corrections, 0);
     }
-
-    // --- live integration (read-only; requires a running wezterm GUI) ---
 
     #[tokio::test]
     #[ignore = "requires a live wezterm GUI instance; read-only probe"]

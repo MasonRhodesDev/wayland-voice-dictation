@@ -1,28 +1,3 @@
-// style2-minimal.slint - Mirrored spectrum pill + live text
-// (copy to ~/.config/voice-dictation/ui/dictation.slint to use)
-// ============================================================================
-// Composed from small functional components (Slint style):
-//   SpectrumBars        - mirrored frequency bars with a fixed footprint
-//   DotRing             - 8-dot ring, shared by processing + closing
-//   ListeningPill       - the pill: spectrum + optional live transcription
-//   ProcessingIndicator - spinner + typing progress bar
-//   ClosingIndicator    - collapsing dot ring
-// The exported Dictation just centers whichever indicator the mode selects.
-// ============================================================================
-// PROPERTIES (set from Rust daemon):
-//
-// mode: int - 0=hidden, 1=listening, 2=processing, 3=closing
-// spectrum: [float] - 8 frequency band values (0.0-1.0) for listening mode
-// text: string - Live transcription, shown centered below the spectrum
-// fade: float - Overall opacity (0.0-1.0) for transitions
-// spinner-angle: float - Spinner rotation in degrees (advanced by Rust each tick)
-// progress: float - Typing progress (0.0-1.0), shown during processing/typing
-// closing-progress: float - Collapse animation progress (0.0-1.0)
-// pre-listening: bool - (unused in this style)
-// ============================================================================
-
-// Mirrored spectrum bars. Fixed footprint so a parent layout can center it.
-// 8 bars * 5px + 7 gaps * 8px = 96px total, centered in 134px = 19px offset.
 component SpectrumBars inherits Rectangle {
     in property <[float]> spectrum;
     in property <float> fade: 1.0;
@@ -46,7 +21,6 @@ component SpectrumBars inherits Rectangle {
     }
 }
 
-// 8 dots arranged in a ring. `radius` collapses them for the closing animation.
 component DotRing inherits Rectangle {
     in property <float> angle;
     in property <float> radius: 10.0;
@@ -65,9 +39,6 @@ component DotRing inherits Rectangle {
     }
 }
 
-// ========== LISTENING MODE - Mirrored Spectrum Pill + live text ==========
-// The pill hugs its content; contents are centered. Text appears only once
-// words arrive, so an idle mic stays a clean minimal pill.
 component ListeningPill inherits Rectangle {
     in property <[float]> spectrum;
     in property <string> text;
@@ -101,7 +72,6 @@ component ListeningPill inherits Rectangle {
     }
 }
 
-// ========== PROCESSING MODE - spinner + typing progress ==========
 component ProcessingIndicator inherits Rectangle {
     in property <float> spinner-angle;
     in property <float> progress;
@@ -120,7 +90,6 @@ component ProcessingIndicator inherits Rectangle {
         alpha: fade;
     }
 
-    // Typing progress bar — only visible once typing starts (progress > 0).
     if progress > 0.0: Rectangle {
         x: 14px;
         y: 50px;
@@ -140,7 +109,6 @@ component ProcessingIndicator inherits Rectangle {
     }
 }
 
-// ========== CLOSING MODE - collapsing dot ring ==========
 component ClosingIndicator inherits Rectangle {
     in property <float> spinner-angle;
     in property <float> closing-progress;
@@ -162,15 +130,12 @@ component ClosingIndicator inherits Rectangle {
 }
 
 export component Dictation inherits Window {
-    // Mode selection: 0=hidden, 1=listening, 2=processing, 3=closing
     in property <int> mode: 0;
 
-    // Listening mode
     in property <[float]> spectrum: [0.3, 0.5, 0.8, 0.4, 0.6, 0.9, 0.3, 0.7];
     in property <string> text: "";              // Live transcription (shown when non-empty)
     in property <bool> pre-listening: false;    // Unused in this style
 
-    // Shared
     in property <float> fade: 1.0;
     in property <float> spinner-angle: 0;       // Advanced by Rust each timer tick
     in property <float> progress: 0.0;          // Typing progress (mode == 2)
@@ -180,8 +145,6 @@ export component Dictation inherits Window {
     default-font-family: "Noto Sans";
     default-font-size: 16px;
 
-    // Center whichever indicator the current mode selects. mode == 0 renders
-    // nothing (the window stays open but empty).
     Rectangle {
         width: 100%;
         height: 100%;

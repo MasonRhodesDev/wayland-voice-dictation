@@ -1,37 +1,13 @@
-# RPM spec for wayland-voice-dictation. Built in COPR from a local SRPM
-# produced by packaging/build-srpm.sh (source tarball from the git tag +
-# vendored cargo deps as Source1 — no rust-*-devel packages needed).
-#
-# ONNX Runtime is loaded dynamically from the system package. Cargo never
-# downloads or links a bundled copy, keeping offline COPR builds reproducible.
-# The test suite runs by default. Disable for a one-off build with
-# --without check; COPR builds run the suite.
 %bcond_without check
 
-# Force cargo to honor the committed Cargo.lock in every phase by appending
-# --locked to the shared option set the %%cargo_build/%%cargo_test/%%cargo_install
-# macros pass to cargo. Without this, %%cargo_install ("cargo install --path .")
-# re-resolves the dependency graph from scratch — unlike "cargo build", it
-# ignores an existing lock file unless told to keep it. Under our vendored,
-# source-replaced config that re-resolution fails for the git dependencies
-# (schema-tui, ksni): cargo will not fetch a git source offline without a lock
-# pinning its commit ("the source git+... requires a lock file to be present
-# first before it can be used against vendored source code"). The committed
-# Cargo.lock already pins those revisions, so --locked makes %%install succeed
-# (the %%build phase already builds fine with the lock). The macro's own option
-# parser rejects a leading "--" argument, so we inject the flag here rather than
-# as `%%cargo_install --locked`.
 %global __cargo_common_opts %{?_smp_mflags} -Z avoid-dev-deps --locked
 
 Name:           wayland-voice-dictation
 Version:        0.7.1
 Release:        1%{?dist}
-# Renamed from hyprland-voice-dictation in 0.6.0; replace the old package on upgrade.
 Obsoletes:      hyprland-voice-dictation < 0.6.0
 Provides:       hyprland-voice-dictation = %{version}-%{release}
 Summary:        Offline voice dictation for Wayland desktops with Parakeet speech recognition
-# Project code is MIT OR Apache-2.0; the binary links a large dependency
-# tree — see LICENSE.dependencies generated at build time.
 License:        MIT OR Apache-2.0
 URL:            https://github.com/MasonRhodesDev/wayland-voice-dictation
 Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
@@ -43,7 +19,6 @@ BuildRequires:  cargo-rpm-macros >= 24
 BuildRequires:  systemd-rpm-macros
 BuildRequires:  pkg-config
 BuildRequires:  clang-devel
-# ort-sys links the system ONNX Runtime (no network in COPR for its downloader)
 BuildRequires:  pkgconfig(libonnxruntime)
 BuildRequires:  pipewire-devel
 BuildRequires:  alsa-lib-devel
@@ -66,15 +41,8 @@ model download script. The ~1.6 GB Parakeet model is NOT part of this
 package; download it after install with `voice-dictation download-model`.
 
 %prep
-# -a1 unpacks the vendor tarball (vendor/ + vendor-git-sources.toml at its
-# root) into the source dir; vendor/ merges with the in-tree
-# third_party/layer-shika-adapters path patch.
 %autosetup -p1 -a1
 %cargo_prep -v vendor
-# %%cargo_prep only redirects crates.io to the vendored sources. This
-# workspace also has git dependencies (schema-tui, ksni); append the git
-# source replacements captured from `cargo vendor` by build-srpm.sh so the
-# build resolves them offline too.
 cfg=.cargo/config.toml
 [ -f "$cfg" ] || cfg=.cargo/config
 cat vendor-git-sources.toml >> "$cfg"

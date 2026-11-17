@@ -1,19 +1,3 @@
-//! Parakeet CTC transcription engine with hotword-boosted beam search
-//!
-//! Uses NVIDIA's Parakeet CTC model (e.g., parakeet-ctc-1.1b) via ONNX Runtime
-//! through the `parakeet-rs` crate's `Parakeet` wrapper.
-//!
-//! Unlike the TDT engine, CTC outputs per-frame probability distributions that
-//! can be biased during beam search decoding for hotword boosting.
-//!
-//! Decoding modes:
-//! - **Greedy** (default): Uses parakeet-rs's built-in CTC greedy decoder
-//! - **Beam search with hotword boost** (future): Maintains a beam of hypotheses
-//!   and applies score bonuses when token sequences match hotword prefixes in a trie.
-//!   Currently requires `parakeet-rs` to expose its audio feature extraction module
-//!   (mel spectrogram). The beam search algorithm is fully implemented in
-//!   [`ctc_beam_search_decode`] and unit-tested with synthetic data.
-
 use anyhow::Result;
 use ndarray::Array2;
 use parakeet_rs::{Parakeet, ParakeetDecoder, TimestampMode, Transcriber};
@@ -25,51 +9,23 @@ use crate::chunking::{transcribe_chunked_with_timestamps, ChunkConfig, Timestamp
 use crate::engine::TranscriptionEngine;
 use crate::hotword_trie::{self, HotwordTrie};
 
-// Audio thresholds (at 16kHz sample rate)
-const MIN_AUDIO_SAMPLES: usize = 2400; // 0.15s minimum for transcription
-const RETRANSCRIBE_THRESHOLD: usize = 4800; // 0.3s of new audio before re-transcribing
+const MIN_AUDIO_SAMPLES: usize = 2400;
+const RETRANSCRIBE_THRESHOLD: usize = 4800;
 
-/// Parakeet CTC-based transcription engine
-///
-/// Uses NVIDIA's Parakeet CTC model for transcription with optional
-/// hotword-boosted beam search decoding. CTC models output per-frame
-/// log-probabilities that can be biased during decoding.
-///
-/// Currently uses greedy decoding via `parakeet-rs`. Beam search with
-/// hotword boosting is implemented ([`ctc_beam_search_decode`]) but requires
-/// direct access to model logits, which needs `parakeet-rs` to expose its
-/// audio feature extraction (mel spectrogram) module.
 pub struct CtcEngine {
-    /// The parakeet CTC model (encoder + greedy decoder)
     parakeet: Arc<Mutex<Parakeet>>,
-    /// Hotword trie for future beam search boosting
-    #[allow(dead_code)] // hotword boosting WIP
+    #[allow(dead_code)]
     hotword_trie: Arc<HotwordTrie>,
-    /// Beam width for beam search (0 = greedy only).
-    /// Currently always uses greedy; beam search is ready but awaits
-    /// feature extraction support from parakeet-rs.
     #[allow(dead_code)]
     beam_width: usize,
-    /// Audio buffer
     audio_buffer: Arc<Mutex<Vec<i16>>>,
     sample_rate: u32,
-    /// Cached transcription text
     current_text: Arc<Mutex<String>>,
-    /// Position in audio_buffer up to which we've transcribed
     last_transcribed_len: Arc<Mutex<usize>>,
-    /// Chunking configuration for long audio
     chunk_config: ChunkConfig,
 }
 
 impl CtcEngine {
-    /// Create a new CTC engine
-    ///
-    /// # Arguments
-    /// * `model_path` - Path to the Parakeet CTC model directory
-    /// * `sample_rate` - Audio sample rate (must be 16000)
-    /// * `hotwords_path` - Optional path to hotwords file
-    /// * `beam_width` - Beam width for search (0 = greedy). Currently only greedy is active;
-    ///   beam search algorithm is implemented but awaits feature extraction support.
     pub fn new(
         model_path: PathBuf,
         sample_rate: u32,
@@ -82,18 +38,12 @@ impl CtcEngine {
             anyhow::bail!("Parakeet requires 16kHz audio, got {} Hz", sample_rate);
         }
 
-        // Load the parakeet-rs CTC model (handles feature extraction + greedy decoding)
         let parakeet = Parakeet::from_pretrained(model_path.to_str().unwrap_or("."), None)?;
 
-        // Load hotword trie
         let tokenizer_path = model_path.join("tokenizer.json");
         let hotword_trie = load_hotword_trie(hotwords_path, &tokenizer_path)?;
 
         if beam_width > 0 && !hotword_trie.is_empty() {
-            // TODO: Beam search with hotword boosting is implemented in ctc_beam_search_decode()
-            // but requires direct access to model logits. This needs parakeet-rs to expose
-            // its audio::extract_features_raw() function, or we add rustfft as a dependency
-            // and reimplement mel spectrogram extraction.
             warn!(
                 "Beam search (width={}) with {} hotwords requested but not yet active. \
                  Using greedy decoding. The beam search algorithm is implemented and tested \
@@ -117,12 +67,10 @@ impl CtcEngine {
         })
     }
 
-    /// Convert i16 samples to f32
     fn samples_to_f32(samples: &[i16]) -> Vec<f32> {
         samples.iter().map(|&s| s as f32 / 32768.0).collect()
     }
 
-    /// Run transcription on a single chunk using greedy decoding
     fn transcribe_chunk(&self, samples: &[i16]) -> Result<String> {
         if samples.is_empty() {
             return Ok(String::new());
@@ -137,7 +85,6 @@ impl CtcEngine {
         Ok(result.text)
     }
 
-    /// Run transcription on a single chunk with timestamps
     fn transcribe_chunk_with_timestamps(&self, samples: &[i16]) -> Result<TimestampedChunkResult> {
         if samples.is_empty() {
             return Ok(TimestampedChunkResult { text: String::new(), words: Vec::new() });
@@ -158,7 +105,6 @@ impl CtcEngine {
         Ok(TimestampedChunkResult { text: result.text, words: result.tokens })
     }
 
-    /// Run transcription on accumulated audio, chunking if necessary
     fn transcribe_buffer(&self, samples: &[i16]) -> Result<String> {
         if samples.is_empty() {
             debug!("transcribe_buffer: empty samples");
@@ -180,14 +126,12 @@ impl CtcEngine {
         let normalized = normalize_audio(samples, 3000.0, 20.0);
         let samples = &normalized;
 
-        // Use timestamped chunking for better merge accuracy when chunking is needed
         if self.chunk_config.needs_chunking(samples) {
             return transcribe_chunked_with_timestamps(samples, &self.chunk_config, |chunk| {
                 self.transcribe_chunk_with_timestamps(chunk)
             });
         }
 
-        // Short audio: single-pass transcription
         self.transcribe_chunk(samples)
     }
 }
@@ -209,7 +153,6 @@ impl TranscriptionEngine for CtcEngine {
     }
 
     fn get_current_text(&self) -> Result<String> {
-        // Lock ordering: audio_buffer -> last_transcribed_len -> current_text
         let buffer = self
             .audio_buffer
             .lock()
@@ -228,14 +171,12 @@ impl TranscriptionEngine for CtcEngine {
             *last_len
         };
 
-        // Only re-transcribe when enough new audio accumulated
         if current_len <= last_len_val + RETRANSCRIBE_THRESHOLD {
             let cached =
                 self.current_text.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
             return Ok(cached.clone());
         }
 
-        // Transcribe full buffer
         let full_audio = buffer.clone();
         drop(buffer);
 
@@ -282,7 +223,6 @@ impl TranscriptionEngine for CtcEngine {
     }
 
     fn reset(&self) {
-        // Lock ordering: audio_buffer -> current_text -> last_transcribed_len
         if let Ok(mut buffer) = self.audio_buffer.lock() {
             buffer.clear();
         }
@@ -295,35 +235,11 @@ impl TranscriptionEngine for CtcEngine {
     }
 }
 
-// ---------------------------------------------------------------------------
-// CTC Beam Search with Hotword Boosting
-// ---------------------------------------------------------------------------
-//
-// This section implements the full CTC beam search algorithm with hotword trie
-// boosting. It is fully functional and unit-tested with synthetic logits data.
-//
-// To activate this in production, we need access to raw model logits, which
-// requires either:
-// 1. parakeet-rs exposing its `audio::extract_features_raw()` function, or
-// 2. Adding `rustfft` as a dependency and reimplementing mel spectrogram
-//    feature extraction in this crate.
-//
-// Once feature extraction is available, the CtcEngine can call:
-//   let features = extract_features(audio_samples);
-//   let logits = model.forward(features);
-//   let text = ctc_beam_search_decode(&logits, &decoder, &trie, beam_width);
-
-/// A hypothesis in the CTC beam search
 #[derive(Debug, Clone)]
 struct BeamHypothesis {
-    /// Token IDs produced so far (after CTC collapse)
     tokens: Vec<u32>,
-    /// Score from blank-ending paths (CTC prefix search)
     blank_score: f32,
-    /// Score from non-blank-ending paths
     non_blank_score: f32,
-    /// Token IDs being tracked for hotword trie matching
-    /// (recent suffix that might be part of a hotword)
     hotword_context: Vec<u32>,
 }
 
@@ -333,25 +249,6 @@ impl BeamHypothesis {
     }
 }
 
-/// CTC beam search decoder with hotword trie boosting.
-///
-/// Algorithm:
-/// 1. At each frame t, get log-probabilities over vocabulary from logits
-/// 2. Maintain a beam of top-K hypotheses
-/// 3. For each hypothesis, consider extending with each token:
-///    - Blank token: keep hypothesis unchanged (CTC blank)
-///    - Same as last token: can mean repeat or blank-then-same
-///    - New token: extend hypothesis
-/// 4. Apply hotword boost: if extending with a token continues a hotword
-///    prefix in the trie, add the partial boost to that hypothesis's score
-/// 5. Prune beam to top-K by score
-/// 6. After all frames, decode the best hypothesis's token sequence
-///
-/// # Arguments
-/// * `logits` - Shape [time_steps, vocab_size] raw logits from the CTC encoder
-/// * `decoder` - ParakeetDecoder for converting token IDs to text
-/// * `hotword_trie` - Trie of hotword token sequences for boosting
-/// * `beam_width` - Number of hypotheses to maintain
 pub fn ctc_beam_search_decode(
     logits: &Array2<f32>,
     decoder: &ParakeetDecoder,
@@ -362,10 +259,8 @@ pub fn ctc_beam_search_decode(
     let vocab_size = logits.shape()[1];
     let blank_id = decoder.pad_token_id() as u32;
 
-    // Convert logits to log-probabilities (log-softmax per frame)
     let log_probs = log_softmax(logits);
 
-    // Initialize beam with empty hypothesis
     let initial = BeamHypothesis {
         tokens: Vec::new(),
         blank_score: 0.0,
@@ -378,12 +273,10 @@ pub fn ctc_beam_search_decode(
     for t in 0..time_steps {
         let frame_log_probs = log_probs.row(t);
 
-        // Map from token sequence -> merged hypothesis
         let mut next_beam: std::collections::HashMap<Vec<u32>, BeamHypothesis> =
             std::collections::HashMap::new();
 
         for hyp in &beam {
-            // --- Blank extension ---
             {
                 let blank_log_prob = frame_log_probs[blank_id as usize];
                 let new_blank_score =
@@ -398,8 +291,6 @@ pub fn ctc_beam_search_decode(
                 entry.blank_score = log_add(entry.blank_score, new_blank_score);
             }
 
-            // --- Non-blank extensions ---
-            // Consider top-K tokens per frame for efficiency
             let top_tokens =
                 top_k_tokens(frame_log_probs.as_slice().unwrap(), beam_width * 3, blank_id);
 
@@ -407,7 +298,6 @@ pub fn ctc_beam_search_decode(
                 let last_token = hyp.tokens.last().copied();
 
                 if Some(token_id) == last_token {
-                    // Same token as last: only extend via blank path (CTC rule)
                     let new_non_blank_score = hyp.blank_score + token_log_prob;
 
                     let boost = if !hotword_trie.is_empty() {
@@ -426,14 +316,12 @@ pub fn ctc_beam_search_decode(
                     entry.non_blank_score =
                         log_add(entry.non_blank_score, new_non_blank_score + boost);
                 } else {
-                    // New token: extend hypothesis
                     let new_non_blank_score =
                         log_add(hyp.blank_score, hyp.non_blank_score) + token_log_prob;
 
                     let mut new_tokens = hyp.tokens.clone();
                     new_tokens.push(token_id);
 
-                    // Update hotword context
                     let mut new_context = hyp.hotword_context.clone();
                     new_context.push(token_id);
 
@@ -443,10 +331,8 @@ pub fn ctc_beam_search_decode(
                         0.0
                     };
 
-                    // Check if context still matches any hotword prefix
                     let trie_match = hotword_trie.query(&new_context);
                     if !trie_match.is_prefix && !trie_match.is_complete {
-                        // Try starting a new hotword from just this token
                         let single = hotword_trie.query(&[token_id]);
                         new_context = if single.is_prefix || single.is_complete {
                             vec![token_id]
@@ -468,7 +354,6 @@ pub fn ctc_beam_search_decode(
             }
         }
 
-        // Prune beam to top-K by total score
         beam = next_beam.into_values().collect();
         beam.sort_by(|a, b| {
             b.total_score().partial_cmp(&a.total_score()).unwrap_or(std::cmp::Ordering::Equal)
@@ -476,7 +361,6 @@ pub fn ctc_beam_search_decode(
         beam.truncate(beam_width);
     }
 
-    // Get best hypothesis
     let best = beam
         .into_iter()
         .max_by(|a, b| {
@@ -493,29 +377,21 @@ pub fn ctc_beam_search_decode(
         return Ok(String::new());
     }
 
-    // Decode token IDs to text.
-    // ParakeetDecoder::decode() internally does argmax + CTC collapse on logits.
-    // We construct a logits matrix where our already-collapsed tokens are the argmax,
-    // with blank frames between them to prevent re-collapsing.
     let fake_logits = build_argmax_logits(&best.tokens, vocab_size);
     let text = decoder.decode(&fake_logits)?;
 
     Ok(text)
 }
 
-/// Build a logits matrix where row i has token_ids[i] as the argmax.
-/// Blank frames are inserted between tokens to prevent CTC collapse
-/// from merging adjacent identical tokens during decoding.
 fn build_argmax_logits(token_ids: &[u32], vocab_size: usize) -> Array2<f32> {
     let num_frames = if token_ids.is_empty() { 1 } else { token_ids.len() * 2 - 1 };
-    let blank_id = 1024; // Parakeet CTC pad_token_id
+    let blank_id = 1024;
     let mut logits = Array2::<f32>::from_elem((num_frames, vocab_size), -100.0);
 
     for (i, &token_id) in token_ids.iter().enumerate() {
         let frame = i * 2;
         logits[[frame, token_id as usize]] = 100.0;
 
-        // Insert blank frame between tokens (except after last)
         if i + 1 < token_ids.len() {
             let blank_frame = frame + 1;
             if (blank_id as usize) < vocab_size {
@@ -527,7 +403,6 @@ fn build_argmax_logits(token_ids: &[u32], vocab_size: usize) -> Array2<f32> {
     logits
 }
 
-/// Compute log-softmax over the vocabulary dimension (axis 1)
 fn log_softmax(logits: &Array2<f32>) -> Array2<f32> {
     let time_steps = logits.shape()[0];
     let vocab_size = logits.shape()[1];
@@ -546,7 +421,6 @@ fn log_softmax(logits: &Array2<f32>) -> Array2<f32> {
     result
 }
 
-/// Log-domain addition: log(exp(a) + exp(b))
 fn log_add(a: f32, b: f32) -> f32 {
     if a == f32::NEG_INFINITY {
         return b;
@@ -558,7 +432,6 @@ fn log_add(a: f32, b: f32) -> f32 {
     max + ((a - max).exp() + (b - max).exp()).ln()
 }
 
-/// Get the top-K token indices by log-probability, excluding blank
 fn top_k_tokens(log_probs: &[f32], k: usize, blank_id: u32) -> Vec<(u32, f32)> {
     let mut indexed: Vec<(u32, f32)> = log_probs
         .iter()
@@ -572,11 +445,6 @@ fn top_k_tokens(log_probs: &[f32], k: usize, blank_id: u32) -> Vec<(u32, f32)> {
     indexed
 }
 
-// ---------------------------------------------------------------------------
-// Utility functions
-// ---------------------------------------------------------------------------
-
-/// Load hotwords from file and build the trie using the model's tokenizer
 fn load_hotword_trie(
     hotwords_path: Option<PathBuf>,
     tokenizer_path: &std::path::Path,
@@ -593,7 +461,6 @@ fn load_hotword_trie(
         return Ok(HotwordTrie::empty());
     }
 
-    // Load tokenizer to convert hotwords to token ID sequences
     let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_path)
         .map_err(|e| anyhow::anyhow!("Failed to load tokenizer for hotwords: {}", e))?;
 
@@ -615,8 +482,6 @@ fn load_hotword_trie(
     Ok(HotwordTrie::from_token_sequences(&token_sequences))
 }
 
-/// Normalize audio to a target RMS level for consistent transcription quality.
-/// (Same logic as parakeet_engine.rs)
 fn normalize_audio(samples: &[i16], target_rms: f32, max_gain: f32) -> Vec<i16> {
     if samples.is_empty() {
         return Vec::new();
@@ -677,26 +542,25 @@ mod tests {
         let top = top_k_tokens(&log_probs, 3, 999);
 
         assert_eq!(top.len(), 3);
-        assert_eq!(top[0].0, 3); // -0.5 highest
-        assert_eq!(top[1].0, 1); // -1.0
-        assert_eq!(top[2].0, 4); // -2.0
+        assert_eq!(top[0].0, 3);
+        assert_eq!(top[1].0, 1);
+        assert_eq!(top[2].0, 4);
     }
 
     #[test]
     fn test_top_k_excludes_blank() {
-        let log_probs = vec![-5.0, -1.0, 0.0]; // index 2 highest but it's blank
+        let log_probs = vec![-5.0, -1.0, 0.0];
         let top = top_k_tokens(&log_probs, 3, 2);
         assert!(top.iter().all(|(id, _)| *id != 2));
     }
 
     #[test]
     fn test_build_argmax_logits() {
-        let tokens = vec![5, 10, 5]; // repeated 5
+        let tokens = vec![5, 10, 5];
         let logits = build_argmax_logits(&tokens, 20);
 
         assert_eq!(logits.shape(), &[5, 20]);
 
-        // Frame 0: token 5
         let max_idx_0 = logits
             .row(0)
             .iter()
@@ -705,7 +569,6 @@ mod tests {
             .map(|(i, _)| i);
         assert_eq!(max_idx_0, Some(5));
 
-        // Frame 2: token 10
         let max_idx_2 = logits
             .row(2)
             .iter()
@@ -728,26 +591,19 @@ mod tests {
         assert!(normalized.is_empty());
     }
 
-    /// Test beam search with synthetic logits that spell out a known sequence.
-    /// This verifies the algorithm works correctly without needing a real model.
     #[test]
     fn test_beam_search_synthetic_greedy_equivalent() {
-        // Create logits where greedy decoding would produce tokens [0, 1, 2]
-        // blank_id = 5 (just needs to be != the tokens we use)
         let vocab_size = 6;
         let blank_id: u32 = 5;
 
-        // 6 frames: token0, blank, token1, blank, token2, blank
         let mut logits = Array2::<f32>::from_elem((6, vocab_size), -10.0);
-        logits[[0, 0]] = 10.0; // Frame 0: token 0
-        logits[[1, blank_id as usize]] = 10.0; // Frame 1: blank
-        logits[[2, 1]] = 10.0; // Frame 2: token 1
-        logits[[3, blank_id as usize]] = 10.0; // Frame 3: blank
-        logits[[4, 2]] = 10.0; // Frame 4: token 2
-        logits[[5, blank_id as usize]] = 10.0; // Frame 5: blank
+        logits[[0, 0]] = 10.0;
+        logits[[1, blank_id as usize]] = 10.0;
+        logits[[2, 1]] = 10.0;
+        logits[[3, blank_id as usize]] = 10.0;
+        logits[[4, 2]] = 10.0;
+        logits[[5, blank_id as usize]] = 10.0;
 
-        // Without a real decoder/tokenizer, we can test the beam search internals
-        // by checking that the best hypothesis has tokens [0, 1, 2]
         let log_probs = log_softmax(&logits);
         let time_steps = log_probs.shape()[0];
 
@@ -768,7 +624,6 @@ mod tests {
                 std::collections::HashMap::new();
 
             for hyp in &beam {
-                // Blank extension
                 {
                     let blp = frame_lp[blank_id as usize];
                     let new_bs = log_add(hyp.blank_score, hyp.non_blank_score) + blp;
@@ -828,43 +683,27 @@ mod tests {
         assert_eq!(best.tokens, vec![0, 1, 2]);
     }
 
-    /// Test that hotword boosting changes the beam search result
     #[test]
     fn test_beam_search_hotword_boost_effect() {
         use crate::hotword_trie::HotwordEntry;
 
-        // Create ambiguous logits where tokens 3 and 4 are close in probability
-        // Hotword trie will boost the sequence [3, 4]
         let vocab_size = 6;
         let blank_id: u32 = 5;
 
-        // 4 frames
         let mut logits = Array2::<f32>::from_elem((4, vocab_size), -10.0);
-        // Frame 0: token 3 slightly less probable than token 0
         logits[[0, 0]] = 5.0;
-        logits[[0, 3]] = 4.8; // Close but lower
+        logits[[0, 3]] = 4.8;
         logits[[0, blank_id as usize]] = -5.0;
-        // Frame 1: blank
         logits[[1, blank_id as usize]] = 5.0;
-        // Frame 2: token 4 slightly less probable than token 1
         logits[[2, 1]] = 5.0;
-        logits[[2, 4]] = 4.8; // Close but lower
+        logits[[2, 4]] = 4.8;
         logits[[2, blank_id as usize]] = -5.0;
-        // Frame 3: blank
         logits[[3, blank_id as usize]] = 5.0;
 
-        // Build hotword trie boosting sequence [3, 4]
-        let entries = vec![(
-            HotwordEntry {
-                text: "hotword".to_string(),
-                boost_score: 6.0, // Strong boost
-            },
-            vec![3, 4],
-        )];
+        let entries =
+            vec![(HotwordEntry { text: "hotword".to_string(), boost_score: 6.0 }, vec![3, 4])];
         let trie = HotwordTrie::from_token_sequences(&entries);
 
-        // Run beam search with boosting (inline, since we can't use the full decode
-        // function without a real tokenizer)
         let log_probs = log_softmax(&logits);
         let beam_width = 5;
 
@@ -951,8 +790,6 @@ mod tests {
             })
             .unwrap();
 
-        // With the hotword boost, sequence [3, 4] should win over [0, 1]
-        // even though [0, 1] had slightly higher raw probabilities
         assert_eq!(best.tokens, vec![3, 4], "Hotword boost should have changed the result");
     }
 }

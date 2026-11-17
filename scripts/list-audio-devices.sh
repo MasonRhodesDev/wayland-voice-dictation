@@ -1,11 +1,7 @@
 #!/bin/bash
-# List ALSA audio input devices with friendly descriptions
-# Filters out duplicates and prefers commonly used device types
 
-# Always include default first with description
 echo "default (System Default)"
 
-# Parse arecord -L output to get device names with descriptions
 arecord -L 2>/dev/null | awk '
 BEGIN { device = ""; desc = "" }
 /^[^ ]/ {

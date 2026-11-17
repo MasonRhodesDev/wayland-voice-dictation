@@ -1,19 +1,3 @@
-//! Event-emitting transcription contract.
-//!
-//! Transition target: this [`StreamingEngine`] trait is intended to replace the
-//! pull-based [`crate::engine::TranscriptionEngine`]. Instead of the main loop
-//! polling `get_current_text()` on its own 200ms cadence, an engine *pushes*
-//! [`TranscriptEvent`]s on its own cadence and the loop simply consumes them.
-//!
-//! Local ONNX models are adapted *up* to this push contract via
-//! [`LocalEngineDriver`], which owns the re-transcribe cadence on a dedicated
-//! **blocking thread** — moving CPU-bound inference off the tokio runtime
-//! (the old path ran inference inside a `tokio::spawn`ed task). Hosted engines
-//! (e.g. OpenAI) implement [`StreamingEngine`] directly.
-//!
-//! Building Step 1: this module is additive and unit-tested but not yet wired
-//! into the daemon loop (that is Step 2).
-
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -25,31 +9,20 @@ use tracing::{debug, error};
 
 use crate::post_processing::{Stage, LOCAL_MODEL_STAGES};
 
-/// ~0.15s @ 16kHz: minimum buffered audio before the first partial transcription.
 const MIN_AUDIO_SAMPLES: usize = 2400;
-/// ~0.3s @ 16kHz: new audio required since the last partial before re-transcribing.
 const RETRANSCRIBE_THRESHOLD: usize = 4800;
-/// Wake cadence for the driver worker (matches the old preview-task poll interval).
 const PARTIAL_TICK: Duration = Duration::from_millis(200);
 
-/// A transcription update pushed by an engine on its own cadence.
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
-    /// Rolling preview. Replaces any prior partial (not additive).
     Partial(String),
-    /// Committed transcript for the utterance.
     Final(String),
-    /// Engine-level failure. Surfaced to the consumer; **never** an implicit
-    /// signal to switch engines — one engine per session, no fallback.
     Error(EngineError),
 }
 
-/// An engine-level failure.
 #[derive(Debug, Clone)]
 pub enum EngineError {
-    /// The model failed to produce a transcription.
     Transcription(String),
-    /// A backend/transport failure (network, IO, etc.).
     Backend(String),
 }
 
@@ -63,63 +36,33 @@ impl std::fmt::Display for EngineError {
 }
 impl std::error::Error for EngineError {}
 
-/// The event stream handed to the consumer (daemon loop / GUI bridge).
 pub type EventStream = tokio_mpsc::UnboundedReceiver<TranscriptEvent>;
 
-/// Push-based transcription engine: feed audio, consume [`TranscriptEvent`]s.
-///
-/// Both local (via [`LocalEngineDriver`]) and hosted engines satisfy this, so
-/// the daemon loop can consume any engine uniformly without branching on kind.
 pub trait StreamingEngine: Send + Sync {
-    /// Feed captured audio (16-bit PCM, mono, at the configured sample rate).
     fn process_audio(&self, samples: &[i16]) -> Result<()>;
 
-    /// Subscribe to this engine's event stream for the current session.
-    /// Calling again replaces the previous subscription.
     fn subscribe(&self) -> EventStream;
 
-    /// Signal end-of-utterance. The engine finalizes and emits [`TranscriptEvent::Final`].
     fn finish(&self);
 
-    /// Clear all state for a new session.
     fn reset(&self);
 
-    /// A copy of the full captured audio buffer (for debug_audio, etc.).
     fn get_audio_buffer(&self) -> Vec<i16>;
 
-    /// The post-processing stages this engine's output needs.
-    ///
-    /// Every engine must declare this explicitly. Local models need the full
-    /// helper chain; hosted models that already return punctuated, cased,
-    /// vocabulary-aware text declare fewer or none. The `[pipeline]` config
-    /// section can still override the list per provider.
     fn default_stages(&self) -> Vec<Stage>;
 }
 
-/// A pure, synchronous local transcription model: samples in, text out.
-///
-/// The existing ONNX engines implement this by delegating to their internal
-/// `transcribe_buffer`. Buffering and cadence are owned by [`LocalEngineDriver`],
-/// so implementors stay stateless with respect to the audio buffer.
 pub trait LocalModel: Send + Sync {
     fn transcribe(&self, samples: &[i16]) -> Result<String>;
 }
 
-/// Control messages from the [`StreamingEngine`] surface to the worker thread.
 enum Ctrl {
-    /// New audio was buffered — consider emitting a partial.
     Audio,
-    /// End of utterance — emit a final over the full buffer.
     Finish,
-    /// New session — reset cadence state.
     Reset,
-    /// Tear down the worker thread.
     Shutdown,
 }
 
-/// Adapts a synchronous [`LocalModel`] to the push-based [`StreamingEngine`]
-/// contract. Owns the audio buffer and runs the throttled re-transcribe loop on
-/// a dedicated blocking thread (never on the tokio runtime).
 pub struct LocalEngineDriver {
     buffer: Arc<Mutex<Vec<i16>>>,
     event_tx: Arc<Mutex<Option<tokio_mpsc::UnboundedSender<TranscriptEvent>>>>,
@@ -153,7 +96,6 @@ impl StreamingEngine for LocalEngineDriver {
             .lock()
             .map_err(|e| anyhow::anyhow!("audio buffer lock poisoned: {e}"))?
             .extend_from_slice(samples);
-        // Worker may have already exited (shutdown); ignore send failure.
         let _ = self.ctrl_tx.send(Ctrl::Audio);
         Ok(())
     }
@@ -200,7 +142,6 @@ impl Drop for LocalEngineDriver {
     }
 }
 
-/// Emit an event to the current subscriber, if any.
 fn emit(
     slot: &Mutex<Option<tokio_mpsc::UnboundedSender<TranscriptEvent>>>,
     event: TranscriptEvent,
@@ -212,9 +153,6 @@ fn emit(
     }
 }
 
-/// The driver's blocking worker loop. Wakes on new audio or every
-/// [`PARTIAL_TICK`]; emits [`TranscriptEvent::Partial`] once enough new audio
-/// has accrued, and [`TranscriptEvent::Final`] on [`Ctrl::Finish`].
 fn run_worker(
     model: Arc<dyn LocalModel>,
     buffer: Arc<Mutex<Vec<i16>>>,
@@ -251,7 +189,6 @@ fn run_worker(
             }
 
             Ok(Ctrl::Audio) | Err(RecvTimeoutError::Timeout) => {
-                // Decide whether to transcribe without holding the lock over inference.
                 let pending = {
                     let Ok(b) = buffer.lock() else {
                         error!("driver: audio buffer lock poisoned; stopping worker");
@@ -291,7 +228,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::{timeout, Duration as TDuration};
 
-    /// Deterministic model: transcript encodes the sample count it saw.
     struct CountModel {
         calls: Arc<AtomicUsize>,
     }
@@ -317,7 +253,6 @@ mod tests {
         let driver = LocalEngineDriver::new(Arc::new(CountModel { calls: calls.clone() }));
         let mut rx = driver.subscribe();
 
-        // Enough new audio to clear MIN + RETRANSCRIBE_THRESHOLD → one partial.
         driver.process_audio(&[0i16; MIN_AUDIO_SAMPLES + RETRANSCRIBE_THRESHOLD + 1]).unwrap();
 
         let ev =
@@ -329,7 +264,6 @@ mod tests {
 
         driver.finish();
 
-        // The Final may arrive after another partial tick; drain a few events.
         let mut saw_final = false;
         for _ in 0..5 {
             match timeout(RECV_TIMEOUT, rx.recv()).await {
@@ -350,7 +284,6 @@ mod tests {
         let driver = LocalEngineDriver::new(Arc::new(CountModel { calls }));
         let mut rx = driver.subscribe();
 
-        // Below MIN_AUDIO_SAMPLES → no partial, but finish must still finalize.
         driver.process_audio(&[0i16; 1000]).unwrap();
         driver.finish();
 
@@ -363,7 +296,7 @@ mod tests {
         let driver = LocalEngineDriver::new(Arc::new(FailModel));
         let mut rx = driver.subscribe();
 
-        driver.finish(); // triggers a final transcribe → error
+        driver.finish();
         let ev = timeout(RECV_TIMEOUT, rx.recv()).await.expect("error timed out").expect("closed");
         assert!(matches!(ev, TranscriptEvent::Error(_)), "got {ev:?}");
     }

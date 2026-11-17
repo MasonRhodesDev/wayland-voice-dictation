@@ -1,48 +1,18 @@
-// dictation.slint - Unified overlay component with mode switching
-// ============================================================================
-// STYLE 1 (Default) - Minimal dark overlay
-//   - Black rounded rectangle with white text/elements
-//   - Spectrum visualizer bars for listening mode
-//   - Spinning dots for processing/closing modes
-// ============================================================================
-// PROPERTIES (set from Rust daemon):
-//
-// mode: int - Current display mode:
-//             0 = hidden (window stays open but nothing visible)
-//             1 = listening (spectrum + text)
-//             2 = processing (spinner)
-//             3 = closing (collapse animation)
-//
-// spectrum: [float] - 8 frequency band values (0.0-1.0) for listening mode
-// text: string - Transcription text for listening mode
-// fade: float - Overall opacity (0.0-1.0) for transitions
-// closing-progress: float - Collapse animation progress (0.0-1.0)
-// pre-listening: bool - Shows "Starting..." instead of spectrum
-// ============================================================================
-
 export component Dictation inherits Window {
-    // Mode selection
     in property <int> mode: 0;  // 0=hidden, 1=listening, 2=processing, 3=closing
 
-    // Listening mode properties
     in property <[float]> spectrum: [0.3, 0.5, 0.8, 0.4, 0.6, 0.9, 0.3, 0.7];
     in property <string> text: "Listening...";
     in property <bool> pre-listening: false;
 
-    // Shared properties
     in property <float> fade: 1.0;
 
-    // Spinner rotation in degrees, advanced by Rust each timer tick (capped repaint
-    // rate — no free-running Slint animation that could spin uncapped when a state sticks).
     in property <float> spinner-angle: 0;
 
-    // Typing progress (0.0-1.0), shown during processing/typing (mode == 2).
     in property <float> progress: 0.0;
 
-    // Closing mode properties
     in property <float> closing-progress: 0.0;
 
-    // Derived animation states
     property <float> closing-radius: 10.0 * (1.0 - closing-progress);
     property <float> closing-alpha: 1.0 - closing-progress;
 
@@ -50,7 +20,6 @@ export component Dictation inherits Window {
     default-font-family: "Noto Sans";
     default-font-size: 16px;
 
-    // ========== LISTENING MODE (mode == 1) ==========
     if mode == 1: Rectangle {
         width: 380px;
         height: 90px;
@@ -62,8 +31,6 @@ export component Dictation inherits Window {
             spacing: 8px;
             alignment: center;
 
-            // Spectrum visualizer - hidden during pre-listening
-            // Fixed height container prevents text from jumping
             if !pre-listening: Rectangle {
                 height: 24px;
                 background: transparent;
@@ -85,7 +52,6 @@ export component Dictation inherits Window {
                 }
             }
 
-            // Status text
             Text {
                 text: pre-listening ? "Starting..." : root.text;
                 color: white.with_alpha(fade);
@@ -97,14 +63,12 @@ export component Dictation inherits Window {
         }
     }
 
-    // ========== PROCESSING MODE (mode == 2) ==========
     if mode == 2: Rectangle {
         width: 60px;
         height: 60px;
         background: #000000.with_alpha(0.9 * fade);
         border-radius: 30px;
 
-        // Spinner - 8 dots in a circle
         Rectangle {
             x: 15px;
             y: 15px;
@@ -121,7 +85,6 @@ export component Dictation inherits Window {
             }
         }
 
-        // Typing progress bar — only visible once typing starts (progress > 0).
         if progress > 0.0: Rectangle {
             x: 14px;
             y: 50px;
@@ -141,14 +104,12 @@ export component Dictation inherits Window {
         }
     }
 
-    // ========== CLOSING MODE (mode == 3) ==========
     if mode == 3: Rectangle {
         width: 60px;
         height: 60px;
         background: #000000.with_alpha(0.9 * closing-alpha);
         border-radius: 30px;
 
-        // Collapsing dots
         Rectangle {
             x: 15px;
             y: 15px;
@@ -166,5 +127,4 @@ export component Dictation inherits Window {
         }
     }
 
-    // mode == 0 (hidden): nothing rendered, window stays open
 }

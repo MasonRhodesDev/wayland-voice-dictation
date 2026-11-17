@@ -1,15 +1,6 @@
 use super::TextProcessor;
 use anyhow::Result;
 
-/// Simple rule-based punctuation and capitalization processor.
-///
-/// Applies the following transformations:
-/// - Capitalizes the first word
-/// - Capitalizes the pronoun "I" (including in contractions)
-/// - Capitalizes words following sentence endings (. ? !)
-///
-/// This processor is designed to be fast (<5ms) and requires
-/// no external dependencies or model files.
 pub struct PunctuationProcessor;
 
 impl Default for PunctuationProcessor {
@@ -40,16 +31,13 @@ impl TextProcessor for PunctuationProcessor {
             result.push_str(&processed);
             result.push(' ');
 
-            // Check if this word ends with a sentence terminator
             capitalize_next = ends_with_sentence_terminator(&processed);
         }
 
-        // Remove trailing space
         Ok(result.trim_end().to_string())
     }
 }
 
-/// Capitalize the first character of a word.
 fn capitalize_first(word: &str) -> String {
     let mut chars = word.chars();
     match chars.next() {
@@ -63,19 +51,11 @@ fn capitalize_first(word: &str) -> String {
     }
 }
 
-/// Capitalize pronoun "I" if it appears standalone or in contractions.
-///
-/// Examples:
-/// - "i" → "I"
-/// - "i'm" → "I'm"
-/// - "i'll" → "I'll"
-/// - "i've" → "I've"
 fn capitalize_pronoun_i(word: &str) -> String {
     if word.len() == 1 && word == "i" {
         return "I".to_string();
     }
 
-    // Handle contractions like "i'm", "i'll", "i've"
     if word.len() > 1 && word.starts_with('i') && !word.chars().nth(1).unwrap().is_alphanumeric() {
         let mut result = String::with_capacity(word.len());
         result.push('I');
@@ -86,7 +66,6 @@ fn capitalize_pronoun_i(word: &str) -> String {
     word.to_string()
 }
 
-/// Check if a word ends with a sentence terminator.
 fn ends_with_sentence_terminator(word: &str) -> bool {
     word.ends_with('.') || word.ends_with('?') || word.ends_with('!')
 }

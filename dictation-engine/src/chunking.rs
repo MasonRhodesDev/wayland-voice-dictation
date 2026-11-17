@@ -1,19 +1,10 @@
-//! Audio chunking utilities for long transcriptions
-//!
-//! Provides reusable chunking and merging logic for transcription engines
-//! that have context length limits.
-
 use parakeet_rs::TimedToken;
 use tracing::debug;
 
-/// Configuration for audio chunking
 #[derive(Debug, Clone)]
 pub struct ChunkConfig {
-    /// Maximum chunk duration in seconds
     pub max_chunk_seconds: u32,
-    /// Overlap between chunks in seconds (to avoid cutting words)
     pub overlap_seconds: u32,
-    /// Sample rate in Hz
     pub sample_rate: u32,
 }
 
@@ -24,28 +15,23 @@ impl Default for ChunkConfig {
 }
 
 impl ChunkConfig {
-    /// Create a new chunk config
     pub fn new(max_chunk_seconds: u32, overlap_seconds: u32, sample_rate: u32) -> Self {
         Self { max_chunk_seconds, overlap_seconds, sample_rate }
     }
 
-    /// Maximum samples per chunk
     pub fn max_chunk_samples(&self) -> usize {
         (self.max_chunk_seconds * self.sample_rate) as usize
     }
 
-    /// Overlap samples between chunks
     pub fn overlap_samples(&self) -> usize {
         (self.overlap_seconds * self.sample_rate) as usize
     }
 
-    /// Check if audio needs chunking
     pub fn needs_chunking(&self, samples: &[i16]) -> bool {
         samples.len() > self.max_chunk_samples()
     }
 }
 
-/// Iterator over audio chunks with overlap
 #[allow(dead_code)]
 pub struct AudioChunks<'a> {
     samples: &'a [i16],
@@ -55,7 +41,6 @@ pub struct AudioChunks<'a> {
 }
 
 impl<'a> AudioChunks<'a> {
-    /// Create a new chunk iterator
     #[allow(dead_code)]
     pub fn new(samples: &'a [i16], config: ChunkConfig) -> Self {
         Self { samples, config, offset: 0, chunk_num: 0 }
@@ -63,7 +48,7 @@ impl<'a> AudioChunks<'a> {
 }
 
 impl<'a> Iterator for AudioChunks<'a> {
-    type Item = (usize, &'a [i16]); // (chunk_number, samples)
+    type Item = (usize, &'a [i16]);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.offset >= self.samples.len() {
@@ -77,7 +62,6 @@ impl<'a> Iterator for AudioChunks<'a> {
         let chunk = &self.samples[self.offset..chunk_end];
         let chunk_num = self.chunk_num;
 
-        // Advance for next iteration
         self.offset += max_samples - overlap;
         self.chunk_num += 1;
 
@@ -85,17 +69,12 @@ impl<'a> Iterator for AudioChunks<'a> {
     }
 }
 
-/// Result of transcribing a chunk with word-level timestamps
 #[derive(Debug, Clone)]
 pub struct TimestampedChunkResult {
     pub text: String,
     pub words: Vec<TimedToken>,
 }
 
-/// Find the quietest frame near `target_pos` within a search window.
-///
-/// Scans for the lowest-energy frame to avoid splitting audio mid-word.
-/// Returns the best split position (start of the quietest frame).
 fn find_silence_boundary(
     samples: &[i16],
     target_pos: usize,
@@ -132,13 +111,11 @@ fn find_silence_boundary(
     best_pos
 }
 
-/// Generate VAD-aware chunk boundaries that prefer silence points over fixed splits
 fn chunk_boundaries_vad(samples: &[i16], config: &ChunkConfig) -> Vec<(usize, usize)> {
     let max_samples = config.max_chunk_samples();
     let overlap = config.overlap_samples();
-    // 1 second search window, 25ms frames at configured sample rate
     let search_window = config.sample_rate as usize;
-    let frame_size = config.sample_rate as usize / 40; // 25ms
+    let frame_size = config.sample_rate as usize / 40;
 
     let mut boundaries = Vec::new();
     let mut offset = 0;
@@ -146,7 +123,6 @@ fn chunk_boundaries_vad(samples: &[i16], config: &ChunkConfig) -> Vec<(usize, us
     while offset < samples.len() {
         let ideal_end = (offset + max_samples).min(samples.len());
 
-        // For the last chunk or if very close to the end, just take it all
         let chunk_end = if ideal_end >= samples.len()
             || samples.len() - ideal_end < config.sample_rate as usize
         {
@@ -161,17 +137,12 @@ fn chunk_boundaries_vad(samples: &[i16], config: &ChunkConfig) -> Vec<(usize, us
             break;
         }
 
-        // Next chunk starts overlap before the boundary
         offset = chunk_end.saturating_sub(overlap);
     }
 
     boundaries
 }
 
-/// Merge timestamped chunk results using word time positions instead of text matching.
-///
-/// For overlapping regions, keeps chunk N's words (more left context) and appends
-/// chunk N+1's words that start after the overlap zone.
 fn merge_chunks_timestamped(chunks: &[TimestampedChunkResult], overlap_seconds: f32) -> String {
     if chunks.is_empty() {
         return String::new();
@@ -184,7 +155,6 @@ fn merge_chunks_timestamped(chunks: &[TimestampedChunkResult], overlap_seconds: 
 
     for (i, chunk) in chunks.iter().enumerate() {
         if i == 0 {
-            // First chunk: keep all words
             all_words.extend(chunk.words.iter());
             continue;
         }
@@ -193,17 +163,12 @@ fn merge_chunks_timestamped(chunks: &[TimestampedChunkResult], overlap_seconds: 
             continue;
         }
 
-        // Find where the previous chunk's time coverage ends
         let prev_end_time = all_words.last().map(|w| w.end).unwrap_or(0.0);
 
-        // Skip words from this chunk that fall within the overlap zone
-        // (they were already covered by the previous chunk with better context)
         let overlap_cutoff = prev_end_time - overlap_seconds;
 
         for word in &chunk.words {
-            // Keep words that start after the overlap zone
             if word.start >= overlap_cutoff {
-                // Avoid duplicating the last word if timestamps are very close
                 if let Some(last) = all_words.last() {
                     if last.text.eq_ignore_ascii_case(&word.text)
                         && (word.start - last.start).abs() < overlap_seconds
@@ -216,7 +181,6 @@ fn merge_chunks_timestamped(chunks: &[TimestampedChunkResult], overlap_seconds: 
         }
     }
 
-    // Build text from collected words
     let mut result = String::new();
     for (i, word) in all_words.iter().enumerate() {
         let is_standalone_punct = word.text.len() == 1
@@ -230,10 +194,6 @@ fn merge_chunks_timestamped(chunks: &[TimestampedChunkResult], overlap_seconds: 
     result
 }
 
-/// Process long audio in chunks using timestamped transcription for accurate merging.
-///
-/// Uses VAD-aware boundaries and word timestamps to merge chunks without
-/// the fragility of text-based overlap matching.
 pub fn transcribe_chunked_with_timestamps<F>(
     samples: &[i16],
     config: &ChunkConfig,
@@ -267,7 +227,6 @@ where
 
         match transcribe_fn(chunk) {
             Ok(mut result) => {
-                // Offset timestamps to absolute positions
                 for word in &mut result.words {
                     word.start += chunk_start_sec;
                     word.end += chunk_start_sec;
@@ -299,7 +258,6 @@ where
     Ok(merged)
 }
 
-/// Merge transcription chunks, removing duplicate words at overlap boundaries
 #[allow(dead_code)]
 pub fn merge_chunks(chunks: &[String]) -> String {
     if chunks.is_empty() {
@@ -320,7 +278,6 @@ pub fn merge_chunks(chunks: &[String]) -> String {
     result
 }
 
-/// Merge two adjacent transcription chunks
 #[allow(dead_code)]
 fn merge_two_chunks(first: &str, second: &str) -> String {
     let first_words: Vec<&str> = first.split_whitespace().collect();
@@ -333,8 +290,6 @@ fn merge_two_chunks(first: &str, second: &str) -> String {
         return first.to_string();
     }
 
-    // Look for overlap: find where second starts that matches end of first
-    // Check last N words of first against first N words of second
     let max_overlap_words = 10.min(first_words.len()).min(second_words.len());
     let mut best_overlap = 0;
 
@@ -342,7 +297,6 @@ fn merge_two_chunks(first: &str, second: &str) -> String {
         let first_end = &first_words[first_words.len() - overlap_len..];
         let second_start = &second_words[..overlap_len];
 
-        // Case-insensitive comparison for better matching
         let matches =
             first_end.iter().zip(second_start.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b));
 
@@ -351,7 +305,6 @@ fn merge_two_chunks(first: &str, second: &str) -> String {
         }
     }
 
-    // Build result
     let mut result = first.to_string();
 
     if best_overlap > 0 {
@@ -362,7 +315,6 @@ fn merge_two_chunks(first: &str, second: &str) -> String {
             result.push_str(&new_words.join(" "));
         }
     } else {
-        // No overlap found, just append with space
         result.push(' ');
         result.push_str(second);
     }
@@ -370,15 +322,6 @@ fn merge_two_chunks(first: &str, second: &str) -> String {
     result
 }
 
-/// Process long audio in chunks using a provided transcription function
-///
-/// # Arguments
-/// * `samples` - Audio samples to transcribe
-/// * `config` - Chunking configuration
-/// * `transcribe_fn` - Function that transcribes a single chunk
-///
-/// # Returns
-/// Merged transcription result
 #[allow(dead_code)]
 pub fn transcribe_chunked<F>(
     samples: &[i16],
@@ -388,7 +331,6 @@ pub fn transcribe_chunked<F>(
 where
     F: Fn(&[i16]) -> anyhow::Result<String>,
 {
-    // Short audio: transcribe directly
     if !config.needs_chunking(samples) {
         debug!("transcribe_chunked: short audio, single pass");
         return transcribe_fn(samples);
@@ -466,27 +408,23 @@ mod tests {
 
     #[test]
     fn test_chunk_iterator() {
-        let samples = vec![0i16; 80000]; // 5 seconds at 16kHz
-        let config = ChunkConfig::new(2, 0, 16000); // 2 second chunks, no overlap
+        let samples = vec![0i16; 80000];
+        let config = ChunkConfig::new(2, 0, 16000);
 
         let chunks: Vec<_> = AudioChunks::new(&samples, config).collect();
-        assert_eq!(chunks.len(), 3); // ceil(5/2) = 3 chunks
+        assert_eq!(chunks.len(), 3);
     }
 
     #[test]
     fn test_needs_chunking() {
         let config = ChunkConfig::new(30, 2, 16000);
 
-        // 20 seconds - no chunking needed
         let short = vec![0i16; 320000];
         assert!(!config.needs_chunking(&short));
 
-        // 60 seconds - needs chunking
         let long = vec![0i16; 960000];
         assert!(config.needs_chunking(&long));
     }
-
-    // === EDGE CASE TESTS ===
 
     #[test]
     fn test_empty_samples() {
@@ -499,14 +437,11 @@ mod tests {
 
     #[test]
     fn test_very_short_samples_below_threshold() {
-        // Test samples shorter than minimum threshold (2400 samples = 0.15s)
         let config = ChunkConfig::new(30, 2, 16000);
 
-        // 1000 samples = 0.0625s - too short
         let tiny = vec![0i16; 1000];
         assert!(!config.needs_chunking(&tiny));
 
-        // 2400 samples = 0.15s - exactly at threshold
         let threshold = vec![0i16; 2400];
         assert!(!config.needs_chunking(&threshold));
     }
@@ -515,26 +450,21 @@ mod tests {
     fn test_long_sample_chunking_count() {
         let config = ChunkConfig::new(30, 2, 16000);
 
-        // 60 seconds = 960000 samples
         let samples = vec![0i16; 960000];
         assert!(config.needs_chunking(&samples));
 
-        // With 30s chunks and 2s overlap, effective chunk step = 28s
-        // 60s / 28s = ~2.14, so 3 chunks
         let chunks: Vec<_> = AudioChunks::new(&samples, config).collect();
         assert_eq!(chunks.len(), 3);
     }
 
     #[test]
     fn test_chunk_overlap_boundaries() {
-        // 3 seconds of audio with 1s chunks and 0.5s overlap
-        let config = ChunkConfig::new(1, 0, 16000); // 1s chunks, no overlap for simplicity
-        let samples = vec![0i16; 48000]; // 3 seconds
+        let config = ChunkConfig::new(1, 0, 16000);
+        let samples = vec![0i16; 48000];
 
         let chunks: Vec<_> = AudioChunks::new(&samples, config).collect();
         assert_eq!(chunks.len(), 3);
 
-        // Each chunk should be exactly 16000 samples
         for (_, chunk) in &chunks {
             assert_eq!(chunk.len(), 16000);
         }
@@ -542,7 +472,6 @@ mod tests {
 
     #[test]
     fn test_silent_audio_detection() {
-        // Helper to check if audio is silent (all zeros or very low amplitude)
         fn is_silent(samples: &[i16]) -> bool {
             if samples.is_empty() {
                 return true;
@@ -554,15 +483,12 @@ mod tests {
             max_sample < 100 && rms < 50.0
         }
 
-        // Silent audio
         let silent = vec![0i16; 16000];
         assert!(is_silent(&silent));
 
-        // Audio with noise
         let noisy: Vec<i16> = (0..16000).map(|i| (i % 100) as i16 * 100).collect();
         assert!(!is_silent(&noisy));
 
-        // Very low amplitude (background noise level)
         let low_noise: Vec<i16> = (0..16000).map(|i| (i % 50) as i16).collect();
         assert!(is_silent(&low_noise));
     }
@@ -572,13 +498,13 @@ mod tests {
         let config = ChunkConfig::default();
         let result = transcribe_chunked(&[], &config, |_| Ok("test".to_string()));
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "test"); // Empty passes to transcribe_fn
+        assert_eq!(result.unwrap(), "test");
     }
 
     #[test]
     fn test_transcribe_chunked_short_passthrough() {
         let config = ChunkConfig::new(30, 2, 16000);
-        let samples = vec![0i16; 16000]; // 1 second
+        let samples = vec![0i16; 16000];
 
         let result = transcribe_chunked(&samples, &config, |chunk| {
             assert_eq!(chunk.len(), 16000);
@@ -593,8 +519,8 @@ mod tests {
     fn test_transcribe_chunked_long_merges() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let config = ChunkConfig::new(1, 0, 16000); // 1s chunks, no overlap
-        let samples = vec![0i16; 48000]; // 3 seconds
+        let config = ChunkConfig::new(1, 0, 16000);
+        let samples = vec![0i16; 48000];
 
         let chunk_count = AtomicUsize::new(0);
         let result = transcribe_chunked(&samples, &config, |_| {
@@ -604,19 +530,15 @@ mod tests {
 
         assert_eq!(chunk_count.load(Ordering::SeqCst), 3);
         assert!(result.is_ok());
-        // Chunks should be merged with spaces
         assert!(result.unwrap().contains("chunk1"));
     }
 
     #[test]
     fn test_merge_empty_chunks() {
-        // Empty vec
         assert_eq!(merge_chunks(&[]), "");
 
-        // Single empty string
         assert_eq!(merge_chunks(&["".to_string()]), "");
 
-        // Mix of empty and non-empty
         let chunks = vec!["hello".to_string(), "".to_string(), "world".to_string()];
         let merged = merge_chunks(&chunks);
         assert!(merged.contains("hello"));
@@ -625,14 +547,10 @@ mod tests {
 
     #[test]
     fn test_merge_case_insensitive_overlap() {
-        // Overlap detection should be case-insensitive
         let chunks = vec!["Hello World".to_string(), "world foo".to_string()];
         let merged = merge_chunks(&chunks);
-        // Should detect "World" and "world" as overlap
         assert_eq!(merged, "Hello World foo");
     }
-
-    // === TIMESTAMP MERGING TESTS ===
 
     #[test]
     fn test_merge_timestamped_single_chunk() {
@@ -660,7 +578,6 @@ mod tests {
                 ],
             },
             TimestampedChunkResult {
-                // Overlap region re-transcribed "foo" then continues
                 text: "foo bar baz".to_string(),
                 words: vec![
                     TimedToken { text: "foo".to_string(), start: 1.0, end: 1.5 },
@@ -689,30 +606,23 @@ mod tests {
         assert_eq!(merged, "Hello world");
     }
 
-    // === SILENCE BOUNDARY TESTS ===
-
     #[test]
     fn test_find_silence_boundary_prefers_quiet() {
-        // Create audio with a loud section and a quiet gap
-        let mut samples = vec![10000i16; 16000]; // 1s of loud audio
-                                                 // Insert 25ms of silence at position 8000
+        let mut samples = vec![10000i16; 16000];
         for s in &mut samples[8000..8400] {
             *s = 0;
         }
 
         let boundary = find_silence_boundary(&samples, 8000, 1600, 400);
-        // Should find the quiet region near 8000
         assert!((boundary as i64 - 8000).abs() < 800);
     }
 
     #[test]
     fn test_find_silence_boundary_edge_cases() {
         let samples = vec![0i16; 100];
-        // Target beyond array
         let boundary = find_silence_boundary(&samples, 200, 100, 10);
-        assert_eq!(boundary, 100); // Clamped to len
+        assert_eq!(boundary, 100);
 
-        // Empty
         let boundary = find_silence_boundary(&[], 0, 100, 10);
         assert_eq!(boundary, 0);
     }
@@ -720,7 +630,7 @@ mod tests {
     #[test]
     fn test_chunk_boundaries_vad_short_audio() {
         let config = ChunkConfig::new(30, 2, 16000);
-        let samples = vec![0i16; 16000]; // 1 second, no chunking needed
+        let samples = vec![0i16; 16000];
         let boundaries = chunk_boundaries_vad(&samples, &config);
         assert_eq!(boundaries.len(), 1);
         assert_eq!(boundaries[0], (0, 16000));
@@ -728,17 +638,15 @@ mod tests {
 
     #[test]
     fn test_chunk_boundaries_vad_long_audio() {
-        let config = ChunkConfig::new(1, 0, 16000); // 1s chunks
-        let samples = vec![0i16; 48000]; // 3 seconds
+        let config = ChunkConfig::new(1, 0, 16000);
+        let samples = vec![0i16; 48000];
         let boundaries = chunk_boundaries_vad(&samples, &config);
         assert!(boundaries.len() >= 2);
-        // Last boundary should reach end
         assert_eq!(boundaries.last().unwrap().1, 48000);
     }
 
     #[test]
     fn test_audio_statistics_helper() {
-        // Test helper for calculating audio statistics
         fn audio_stats(samples: &[i16]) -> (i16, f64, f32) {
             if samples.is_empty() {
                 return (0, 0.0, 0.0);
@@ -751,14 +659,12 @@ mod tests {
             (max, rms, duration)
         }
 
-        // Silent
         let silent = vec![0i16; 16000];
         let (max, rms, dur) = audio_stats(&silent);
         assert_eq!(max, 0);
         assert_eq!(rms, 0.0);
         assert!((dur - 1.0).abs() < 0.01);
 
-        // Full amplitude
         let loud: Vec<i16> = vec![i16::MAX; 16000];
         let (max, rms, _) = audio_stats(&loud);
         assert_eq!(max, i16::MAX);

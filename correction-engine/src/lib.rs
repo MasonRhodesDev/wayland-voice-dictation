@@ -1,41 +1,3 @@
-//! AT-SPI2-based correction detection engine.
-//!
-//! Monitors text changes in target applications after voice dictation injection,
-//! detects user corrections, and feeds them back into the word substitution pipeline.
-//!
-//! # Architecture
-//!
-//! - **`types`**: Shared data types (no external deps)
-//! - **`diff`**: Pure functions for extracting correction pairs from events
-//! - **`event_filter`**: Pure functions for filtering events by time/position/app
-//! - **`store`**: JSON persistence with frequency counting and auto-promotion
-//! - **`connection`**: AT-SPI2 bus abstraction (trait-based for testability)
-//! - **`wezterm`**: wezterm-native backend (mux CLI pane polling) for
-//!   terminals AT-SPI2 cannot see
-//!
-//! # Usage
-//!
-//! ```rust,no_run
-//! use correction_engine::{CorrectionMonitor, MonitorConfig, InjectionContext};
-//!
-//! # async fn example() -> anyhow::Result<()> {
-//! let monitor = CorrectionMonitor::new(MonitorConfig::default()).await?;
-//!
-//! // After injecting text via wtype...
-//! let context = InjectionContext {
-//!     text: "hello world".to_string(),
-//!     timestamp: chrono::Utc::now(),
-//!     instant: std::time::Instant::now(),
-//!     window_class: "firefox".to_string(),
-//!     window_title: "Example".to_string(),
-//! };
-//!
-//! // Spawns background task, returns immediately
-//! let _handle = monitor.start_monitoring(context);
-//! # Ok(())
-//! # }
-//! ```
-
 pub mod connection;
 pub mod diff;
 pub mod event_filter;
@@ -43,7 +5,6 @@ pub mod store;
 pub mod types;
 pub mod wezterm;
 
-// Re-export primary API types
 pub use connection::{AtspiConnection, MockTextChangeSource, TextChangeSource};
 pub use store::CorrectionStore;
 pub use types::{
@@ -57,8 +18,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-/// The main correction monitor that orchestrates AT-SPI2 event collection,
-/// filtering, correction extraction, and persistence.
 pub struct CorrectionMonitor {
     source: Arc<dyn TextChangeSource>,
     store: Arc<Mutex<CorrectionStore>>,
@@ -66,7 +25,6 @@ pub struct CorrectionMonitor {
 }
 
 impl CorrectionMonitor {
-    /// Create a new correction monitor with the production AT-SPI2 connection.
     pub async fn new(config: MonitorConfig) -> Result<Self> {
         let connection = AtspiConnection::connect().await;
         let store = CorrectionStore::load(&config)?;
@@ -74,7 +32,6 @@ impl CorrectionMonitor {
         Ok(Self { source: Arc::new(connection), store: Arc::new(Mutex::new(store)), config })
     }
 
-    /// Create a correction monitor with a custom event source (for testing).
     pub fn with_source(
         source: Arc<dyn TextChangeSource>,
         store: CorrectionStore,
@@ -83,16 +40,6 @@ impl CorrectionMonitor {
         Self { source, store: Arc::new(Mutex::new(store)), config }
     }
 
-    /// Start monitoring for corrections after text injection.
-    ///
-    /// Spawns a detached background task that:
-    /// 1. Subscribes to AT-SPI2 text-changed events
-    /// 2. Collects events for `monitor_duration_secs`
-    /// 3. Filters events by time/position/app
-    /// 4. Extracts correction pairs
-    /// 5. Records corrections in the store (with auto-promotion)
-    ///
-    /// Returns a JoinHandle that resolves with detected corrections.
     pub fn start_monitoring(
         &self,
         context: InjectionContext,
@@ -112,7 +59,6 @@ impl CorrectionMonitor {
         })
     }
 
-    /// Internal monitoring loop.
     async fn run_monitoring(
         source: Arc<dyn TextChangeSource>,
         store: Arc<Mutex<CorrectionStore>>,
@@ -133,7 +79,6 @@ impl CorrectionMonitor {
             &context.text[..context.text.len().min(30)]
         );
 
-        // Collect events for the monitoring window
         let mut events = Vec::new();
         let deadline = tokio::time::Instant::now() + monitor_duration;
 
@@ -152,12 +97,10 @@ impl CorrectionMonitor {
                     events.push(event);
                 }
                 Ok(None) => {
-                    // Channel closed (source disconnected)
                     debug!("Event channel closed, ending monitoring early");
                     break;
                 }
                 Err(_) => {
-                    // Timeout — monitoring window expired
                     break;
                 }
             }
@@ -171,7 +114,6 @@ impl CorrectionMonitor {
 
         info!("Monitoring window summary: {}", summarize_events(&events));
 
-        // Filter events
         let filtered = event_filter::filter_events(&events, &context, &config);
         debug!("After filtering: {} of {} events are relevant", filtered.len(), events.len());
 
@@ -179,7 +121,6 @@ impl CorrectionMonitor {
             return Ok(Vec::new());
         }
 
-        // Extract corrections
         let corrections = diff::extract_corrections(&context, &filtered);
 
         if corrections.is_empty() {
@@ -189,7 +130,6 @@ impl CorrectionMonitor {
 
         info!("Detected {} correction(s)", corrections.len());
 
-        // Record corrections in store
         let mut store = store.lock().await;
         for correction in &corrections {
             match store.record_correction(correction.clone()) {
@@ -210,28 +150,20 @@ impl CorrectionMonitor {
         Ok(corrections)
     }
 
-    /// Check if AT-SPI2 is available on this system.
     pub fn is_available(&self) -> bool {
         self.source.is_available()
     }
 
-    /// Shared handle to the underlying correction store, so alternative
-    /// backends (e.g. [`wezterm::WeztermMonitor`]) can record into the same
-    /// in-memory store instead of clobbering each other's saves.
     pub fn store_handle(&self) -> Arc<Mutex<CorrectionStore>> {
         Arc::clone(&self.store)
     }
 
-    /// Get correction statistics.
     pub async fn stats(&self) -> CorrectionStats {
         let store = self.store.lock().await;
         store.stats()
     }
 }
 
-/// Summarize a monitoring window's events as counts grouped by source
-/// application and event type. Purely diagnostic — helps explain surprise
-/// event floods (e.g. 122 events from a single injection).
 fn summarize_events(events: &[TextChangeEvent]) -> String {
     let mut per_app: std::collections::BTreeMap<&str, (usize, usize)> =
         std::collections::BTreeMap::new();

@@ -1,16 +1,3 @@
-//! `llm_correction` stage: an LLM pass over the final transcript.
-//!
-//! Applies the speaker's spoken self-corrections ("scratch that", "I mean"),
-//! drops false starts, and fixes glossary terms. It calls Amazon Bedrock
-//! Converse directly with a hand-rolled SigV4 signature, so the daemon needs
-//! no AWS SDK. Credentials come from the standard `AWS_*` environment
-//! variables, or from `aws configure export-credentials` for the configured
-//! profile (which also covers SSO sessions).
-//!
-//! The stage fails open: on a timeout, a missing credential, an HTTP error,
-//! or a reply that does not look like a cleaned-up version of the input, it
-//! logs a warning and returns the text unchanged. Dictation is never blocked.
-
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,19 +10,14 @@ use tracing::{debug, info, warn};
 use super::TextProcessor;
 use crate::user_dictionary::UserDictionary;
 
-/// `[llm_correction]` config section.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmCorrectionConfig {
-    /// Bedrock model id or inference-profile ARN. Empty disables the stage.
     #[serde(default)]
     pub model: String,
     #[serde(default = "default_region")]
     pub region: String,
-    /// AWS profile used for `aws configure export-credentials`. Empty uses the
-    /// environment variables only, then the CLI default profile.
     #[serde(default)]
     pub aws_profile: String,
-    /// Hard ceiling for the whole call, credentials included.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 }
@@ -76,7 +58,6 @@ by keeping only the corrected version.\n\
 Keep everything else: the speaker's wording, tone, and profanity. Do not summarize, answer, \
 explain, or add anything. Reply with only the edited passage, without tags.";
 
-/// Upper bound on glossary terms sent with each request.
 const MAX_GLOSSARY_TERMS: usize = 150;
 
 pub struct LlmCorrectionProcessor {
@@ -110,8 +91,6 @@ impl TextProcessor for LlmCorrectionProcessor {
         let started = Instant::now();
         let timeout = Duration::from_millis(self.config.timeout_ms.max(100));
 
-        // Run the blocking HTTP call on its own thread so the caller can stop
-        // waiting at the deadline even if the socket is still open.
         let (tx, rx) = mpsc::channel();
         let config = self.config.clone();
         let creds = Arc::clone(&self.creds);
@@ -151,8 +130,6 @@ impl TextProcessor for LlmCorrectionProcessor {
     }
 }
 
-/// Reject replies that do not look like an edit of the input: empty, wrapped
-/// in tags, or far longer than what was dictated (the model answered instead).
 fn accept_correction(input: &str, reply: &str) -> Option<String> {
     let reply = reply.trim();
     if reply.is_empty() || reply.contains("<dictation>") {
@@ -204,7 +181,6 @@ fn correct(
     if let Some(token) = &creds.session_token {
         headers.push(("x-amz-security-token".to_string(), token.clone()));
     }
-    // Non-S3 services sign the path URI-encoded a second time.
     let canonical_uri = path.split('/').map(uri_encode).collect::<Vec<_>>().join("/");
     let auth = sigv4_authorization(&SigV4Request {
         method: "POST",
@@ -231,7 +207,6 @@ fn correct(
     let text_body = resp.text()?;
     if !status.is_success() {
         if status.as_u16() == 403 || status.as_u16() == 401 {
-            // Credentials may have expired between calls; refetch next time.
             if let Ok(mut slot) = creds_cache.lock() {
                 *slot = None;
             }
@@ -251,14 +226,11 @@ fn truncate(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-// ---------------------------------------------------------------- credentials
-
 #[derive(Debug, Clone)]
 struct Credentials {
     access_key_id: String,
     secret_access_key: String,
     session_token: Option<String>,
-    /// When to refetch. `None` for static environment credentials.
     refresh_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -332,9 +304,6 @@ fn load_credentials(config: &LlmCorrectionConfig) -> Result<Credentials> {
     })
 }
 
-// ---------------------------------------------------------------------- SigV4
-
-/// RFC 3986 percent-encoding of everything except the unreserved set.
 fn uri_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -352,7 +321,6 @@ struct SigV4Request<'a> {
     method: &'a str,
     canonical_uri: &'a str,
     query: &'a str,
-    /// Lowercase header names. Every header here is signed.
     headers: &'a [(String, String)],
     payload: &'a [u8],
     region: &'a str,
@@ -413,7 +381,6 @@ fn sigv4_authorization(r: &SigV4Request) -> String {
 mod tests {
     use super::*;
 
-    /// AWS SigV4 test suite case `get-vanilla`.
     #[test]
     fn sigv4_matches_aws_test_suite_get_vanilla() {
         let headers = vec![
@@ -472,7 +439,6 @@ mod tests {
 
     #[test]
     fn failure_returns_original_text() {
-        // Unroutable region and no credentials: must fail open, not error.
         let cfg = LlmCorrectionConfig {
             model: "test-model".into(),
             region: "invalid-region-0".into(),

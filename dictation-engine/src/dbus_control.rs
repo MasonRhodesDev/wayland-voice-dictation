@@ -7,12 +7,11 @@ use zbus::interface;
 
 use crate::HealthState;
 
-/// Daemon state enum shared between lib.rs and dbus_control.rs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonState {
-    Idle,       // Waiting for StartRecording command, GUI hidden
-    Recording,  // Actively recording audio and transcribing, GUI visible
-    Processing, // Running transcription and typing, GUI visible with spinner
+    Idle,
+    Recording,
+    Processing,
 }
 
 impl std::fmt::Display for DaemonState {
@@ -25,29 +24,23 @@ impl std::fmt::Display for DaemonState {
     }
 }
 
-/// D-Bus service interface for voice dictation control
 pub struct VoiceDictationService {
     command_sender: Arc<Mutex<tokio::sync::mpsc::Sender<DaemonCommand>>>,
     state_receiver: watch::Receiver<DaemonState>,
     health_state: Arc<HealthState>,
 }
 
-/// Commands that can be sent from D-Bus to the daemon
 #[derive(Debug, Clone)]
 pub enum DaemonCommand {
     StartRecording,
     StopRecording,
     Confirm,
     Shutdown,
-    /// Exit with code 64 so systemd (RestartForceExitStatus=64) restarts the daemon.
     Restart,
-    /// Switch audio input device. None = system default, Some(name) = specific device.
     SwitchDevice(Option<String>),
-    /// Re-arm correction monitoring against the last injection (captures late edits).
     SnapshotCorrection,
 }
 
-/// Response from status query
 #[derive(Debug, Clone)]
 pub struct StatusInfo {
     pub state: String,
@@ -56,7 +49,6 @@ pub struct StatusInfo {
 
 #[interface(name = "com.voicedictation.Control")]
 impl VoiceDictationService {
-    /// Start a new recording session
     async fn start_recording(&self) -> zbus::fdo::Result<()> {
         info!("D-Bus: StartRecording called");
         let sender = self.command_sender.lock().await;
@@ -67,7 +59,6 @@ impl VoiceDictationService {
         Ok(())
     }
 
-    /// Stop the current recording session (cancel)
     async fn stop_recording(&self) -> zbus::fdo::Result<()> {
         info!("D-Bus: StopRecording called");
         let sender = self.command_sender.lock().await;
@@ -78,7 +69,6 @@ impl VoiceDictationService {
         Ok(())
     }
 
-    /// Confirm and finalize the current transcription
     async fn confirm(&self) -> zbus::fdo::Result<()> {
         info!("D-Bus: Confirm called");
         let sender = self.command_sender.lock().await;
@@ -89,7 +79,6 @@ impl VoiceDictationService {
         Ok(())
     }
 
-    /// Get current daemon status
     async fn status(&self) -> zbus::fdo::Result<(String, bool)> {
         info!("D-Bus: Status called");
         let state = *self.state_receiver.borrow();
@@ -97,7 +86,6 @@ impl VoiceDictationService {
         Ok((state.to_string(), session_active))
     }
 
-    /// Get health status of all subsystems
     async fn health_check(&self) -> zbus::fdo::Result<(String, String, String)> {
         info!("D-Bus: HealthCheck called");
 
@@ -127,7 +115,6 @@ impl VoiceDictationService {
         Ok((gui_status.to_string(), engine_status.to_string(), audio_status.to_string()))
     }
 
-    /// Re-arm correction monitoring against the last injection
     async fn snapshot_correction(&self) -> zbus::fdo::Result<()> {
         info!("D-Bus: SnapshotCorrection called");
         let sender = self.command_sender.lock().await;
@@ -138,7 +125,6 @@ impl VoiceDictationService {
         Ok(())
     }
 
-    /// Shutdown the daemon gracefully
     async fn shutdown(&self) -> zbus::fdo::Result<()> {
         info!("D-Bus: Shutdown called");
         let sender = self.command_sender.lock().await;
@@ -150,7 +136,6 @@ impl VoiceDictationService {
     }
 }
 
-/// Create and register D-Bus service
 pub async fn create_dbus_service(
     state_receiver: watch::Receiver<DaemonState>,
     health_state: Arc<HealthState>,
@@ -168,9 +153,6 @@ pub async fn create_dbus_service(
         health_state,
     };
 
-    // Live well-known name is com.voicedictation.Daemon. The interface is
-    // com.voicedictation.Control (some surface docs label the interface).
-    // Do not rename this bus name — CLI and keybinds depend on it.
     let connection = zbus::connection::Builder::session()?
         .name("com.voicedictation.Daemon")?
         .serve_at("/com/voicedictation/Control", service)?

@@ -7,32 +7,17 @@ use harper_core::spell::MutableDictionary;
 use harper_core::{Dialect, Document};
 use std::sync::Arc;
 
-/// Grammar and spell checker using Harper.
-///
-/// Harper is a fast, offline, privacy-first grammar checker designed
-/// for developers. It understands code context and won't flag technical
-/// terms inappropriately.
-///
-/// Features:
-/// - Grammar checking
-/// - Spell checking with system dictionaries
-/// - Developer-friendly (understands code/technical context)
-/// - ~10-20ms processing time
-/// - <50MB memory footprint
-/// - User dictionary integration (app-specific + Hunspell personal dictionary)
 pub struct GrammarProcessor {
     dictionary: Arc<MutableDictionary>,
     user_dict: Option<Arc<UserDictionary>>,
 }
 
 impl GrammarProcessor {
-    /// Create a new grammar processor with Harper's default configuration.
     pub fn new() -> Self {
         let dictionary = MutableDictionary::curated();
         Self { dictionary, user_dict: None }
     }
 
-    /// Create a new grammar processor with user dictionary integration.
     pub fn new_with_user_dictionary(user_dict: Arc<UserDictionary>) -> Self {
         let dictionary = MutableDictionary::curated();
         Self { dictionary, user_dict: Some(user_dict) }
@@ -45,25 +30,19 @@ impl TextProcessor for GrammarProcessor {
             return Ok(String::new());
         }
 
-        // Parse text into Harper document with plain English parser
         let parser = PlainEnglish;
         let document = Document::new(text, &parser, &self.dictionary);
 
-        // Create linter with curated rules
         let mut linter = LintGroup::new_curated(self.dictionary.clone(), Dialect::American);
 
-        // Run linter to find issues
         let lints = linter.lint(&document);
 
-        // Apply suggestions in reverse order to maintain correct positions
         let mut sorted_lints: Vec<Lint> = lints.into_iter().collect();
         sorted_lints.sort_by_key(|l| std::cmp::Reverse(l.span.start));
 
-        // Build corrected text by applying suggestions
         let mut result = text.to_string();
 
         for lint in sorted_lints {
-            // Skip spelling corrections for words in user dictionary
             if matches!(lint.lint_kind, LintKind::Spelling) {
                 if let Some(user_dict) = &self.user_dict {
                     let span = lint.span;
@@ -74,13 +53,11 @@ impl TextProcessor for GrammarProcessor {
                 }
             }
 
-            // Only apply lints with suggestions
             if let Some(suggestion) = get_best_suggestion(&lint) {
                 let span = lint.span;
                 let start = span.start;
                 let end = span.end;
 
-                // Safety check: ensure span is within bounds
                 if start <= result.len() && end <= result.len() && start <= end {
                     result.replace_range(start..end, &suggestion);
                 }
@@ -91,25 +68,13 @@ impl TextProcessor for GrammarProcessor {
     }
 }
 
-/// Extract the best suggestion from a lint.
-///
-/// Prioritizes:
-/// 1. First suggestion from the lint (usually the most confident)
-/// 2. For spelling errors, use the first correction
 fn get_best_suggestion(lint: &Lint) -> Option<String> {
     match &lint.lint_kind {
-        LintKind::Spelling => {
-            // For spelling errors, get the first suggestion
-            lint.suggestions.first().map(suggestion_to_string)
-        }
-        _ => {
-            // For other lints, use the first suggestion if available
-            lint.suggestions.first().map(suggestion_to_string)
-        }
+        LintKind::Spelling => lint.suggestions.first().map(suggestion_to_string),
+        _ => lint.suggestions.first().map(suggestion_to_string),
     }
 }
 
-/// Convert a Harper Suggestion to a replacement string.
 fn suggestion_to_string(suggestion: &Suggestion) -> String {
     match suggestion {
         Suggestion::ReplaceWith(chars) => chars.iter().collect(),
@@ -140,17 +105,14 @@ mod tests {
         let processor = GrammarProcessor::new();
         let input = "This is a correct sentence.";
         let result = processor.process(input).unwrap();
-        // Should remain the same or very similar
         assert!(!result.is_empty());
     }
 
     #[test]
     fn test_simple_spelling() {
         let processor = GrammarProcessor::new();
-        // Note: Harper might or might not catch this depending on its rules
         let input = "This is a tset.";
         let result = processor.process(input).unwrap();
-        // Just verify it doesn't crash
         assert!(!result.is_empty());
     }
 
@@ -159,7 +121,6 @@ mod tests {
         let processor = GrammarProcessor::new();
         let input = "The API endpoint returns JSON data.";
         let result = processor.process(input).unwrap();
-        // Technical terms should be preserved
         assert!(result.contains("API"));
         assert!(result.contains("JSON"));
     }

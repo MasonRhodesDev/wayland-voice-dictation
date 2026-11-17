@@ -1,12 +1,3 @@
-//! Model selection and engine factory
-//!
-//! Provides a unified interface for parsing model specifications and creating
-//! transcription engines. Supports both Parakeet TDT and CTC model variants.
-//!
-//! Model specification format: `parakeet:<model_name>`
-//! - Names starting with `ctc-` route to the CTC engine (e.g., `parakeet:ctc-1.1b`)
-//! - All other names route to the TDT engine (e.g., `parakeet:default`)
-
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,17 +12,13 @@ use crate::openai_realtime_engine::{self, OpenAiRealtimeEngine};
 use crate::parakeet_engine::ParakeetEngine;
 use crate::stream_engine::{LocalEngineDriver, LocalModel, StreamingEngine};
 
-/// Transcription provider selected by a model spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
-    /// Local Parakeet ONNX models (TDT / CTC / CTC-direct).
     Parakeet,
-    /// Hosted OpenAI transcription (batch).
     OpenAi,
 }
 
 impl Provider {
-    /// Config key for this provider (also the `[pipeline]` entry name).
     pub fn key(self) -> &'static str {
         match self {
             Provider::Parakeet => "parakeet",
@@ -40,14 +27,11 @@ impl Provider {
     }
 }
 
-/// Engine construction settings beyond the model name. Each provider reads
-/// only its own part.
 #[derive(Debug, Clone, Default)]
 pub struct EngineOptions {
     pub openai: OpenAiOptions,
 }
 
-/// Parsed model specification from config
 #[derive(Debug, Clone)]
 pub struct ModelSpec {
     pub provider: Provider,
@@ -55,12 +39,10 @@ pub struct ModelSpec {
 }
 
 impl ModelSpec {
-    /// Returns true if this spec selects a CTC model variant
     pub fn is_ctc(&self) -> bool {
         self.model_name.starts_with("ctc-") || self.model_name == "ctc"
     }
 
-    /// Returns true if this spec selects the CTC Direct (ONNX + beam search) engine
     pub fn is_ctc_direct(&self) -> bool {
         self.model_name == "ctc-direct"
     }
@@ -73,12 +55,6 @@ impl std::fmt::Display for ModelSpec {
 }
 
 impl ModelSpec {
-    /// Parse a model specification string (format: "provider:model_name").
-    ///
-    /// # Examples
-    /// - "parakeet:default"         -> local TDT engine
-    /// - "parakeet:ctc-1.1b"        -> local CTC engine
-    /// - "openai:gpt-4o-transcribe" -> hosted OpenAI engine (opt-in)
     pub fn parse(spec: &str) -> Result<Self> {
         let parts: Vec<&str> = spec.splitn(2, ':').collect();
         if parts.len() != 2 {
@@ -102,16 +78,11 @@ impl ModelSpec {
         Ok(Self { provider, model_name: parts[1].to_string() })
     }
 
-    /// Get the base models directory
     fn get_models_dir() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         PathBuf::from(home).join(".config").join("voice-dictation").join("models")
     }
 
-    /// Get the full path to the model directory.
-    ///
-    /// CTC models are stored in `models/parakeet-ctc/`, TDT in `models/parakeet/`.
-    /// `ctc-direct` also uses `models/parakeet-ctc/` (same model files, different engine).
     pub fn model_path(&self) -> PathBuf {
         if self.is_ctc() || self.is_ctc_direct() {
             Self::get_models_dir().join("parakeet-ctc")
@@ -120,27 +91,19 @@ impl ModelSpec {
         }
     }
 
-    /// Check whether the selected engine is usable.
-    ///
-    /// Parakeet checks for on-disk ONNX model files; OpenAI checks that an API
-    /// key is present in the environment (no local model needed).
     pub fn is_available(&self) -> bool {
         if self.provider == Provider::OpenAi {
             return std::env::var("OPENAI_API_KEY").map(|k| !k.is_empty()).unwrap_or(false);
         }
         let path = self.model_path();
         if self.is_ctc() || self.is_ctc_direct() {
-            // CTC needs a single model ONNX file + tokenizer
             has_onnx_model(&path) && path.join("tokenizer.json").exists()
         } else {
-            // TDT needs encoder and decoder ONNX files
             path.join("encoder-model.onnx").exists()
                 && path.join("decoder_joint-model.onnx").exists()
         }
     }
 
-    /// Create a pull-based transcription engine (retained for test-loop-ui).
-    /// Only valid for `parakeet` specs; use `create_streaming_engine` otherwise.
     pub fn create_engine(&self, sample_rate: u32) -> Result<Arc<dyn TranscriptionEngine>> {
         if self.provider != Provider::Parakeet {
             return Err(anyhow!(
@@ -160,7 +123,6 @@ impl ModelSpec {
             info!("Creating parakeet CTC engine with model '{}'", self.model_name);
             let model_path = self.model_path();
             let hotwords_path = Some(hotword_trie::default_hotwords_path());
-            // Default beam width of 10 when hotwords are present
             let beam_width = 10;
             let engine = CtcEngine::new(model_path, sample_rate, hotwords_path, beam_width)?;
             Ok(Arc::new(engine))
@@ -172,10 +134,6 @@ impl ModelSpec {
         }
     }
 
-    /// Create an event-emitting [`StreamingEngine`] for this spec by wrapping the
-    /// selected local model in a `LocalEngineDriver`. This is the daemon's engine
-    /// factory; the older `create_engine` (pull-based trait) is retained for
-    /// test-loop-ui.
     pub fn create_streaming_engine(
         &self,
         sample_rate: u32,
@@ -214,7 +172,6 @@ impl ModelSpec {
         }
     }
 
-    /// Construct the selected local model as a `LocalModel` trait object.
     fn build_local_model(&self, sample_rate: u32) -> Result<Arc<dyn LocalModel>> {
         let model_path = self.model_path();
         if self.is_ctc_direct() {
@@ -234,7 +191,6 @@ impl ModelSpec {
     }
 }
 
-/// Check if a directory contains any .onnx model file
 fn has_onnx_model(dir: &std::path::Path) -> bool {
     let candidates = ["model.onnx", "model_fp16.onnx", "model_int8.onnx", "model_q4.onnx"];
     for candidate in &candidates {
@@ -242,7 +198,6 @@ fn has_onnx_model(dir: &std::path::Path) -> bool {
             return true;
         }
     }
-    // Search for any .onnx file
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if entry.path().extension().and_then(|s| s.to_str()) == Some("onnx") {
@@ -294,7 +249,6 @@ mod tests {
     fn test_parakeet_spec_has_parakeet_provider() {
         let spec = ModelSpec::parse("parakeet:default").unwrap();
         assert_eq!(spec.provider, Provider::Parakeet);
-        // create_engine (pull trait) rejects non-parakeet specs.
         let openai = ModelSpec::parse("openai:gpt-4o-transcribe").unwrap();
         assert!(openai.create_engine(16000).is_err());
     }
@@ -333,7 +287,6 @@ mod tests {
     fn test_model_path_ctc_direct() {
         let spec = ModelSpec::parse("parakeet:ctc-direct").unwrap();
         let path = spec.model_path();
-        // ctc-direct uses the same parakeet-ctc model directory
         assert!(path.to_str().unwrap().ends_with("models/parakeet-ctc"));
     }
 }
