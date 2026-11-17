@@ -12,7 +12,6 @@ pub struct DictationTray {
     command_tx: mpsc::Sender<DaemonCommand>,
     cached_devices: Vec<crate::audio_backend::DeviceInfo>,
     selected_device: Option<String>,
-    /// When true, icon_name returns empty to force ksni to emit NewIcon.
     icon_invalidated: bool,
 }
 
@@ -31,8 +30,6 @@ impl Tray for DictationTray {
 
     fn icon_name(&self) -> String {
         if self.icon_invalidated {
-            // Return a known-valid icon so ksni detects a change and emits NewIcon
-            // without showing a missing-icon placeholder during the transition
             return "content-loading-symbolic".into();
         }
         match self.state {
@@ -76,15 +73,13 @@ impl Tray for DictationTray {
         let is_idle = self.state == DaemonState::Idle;
         let is_recording = self.state == DaemonState::Recording;
 
-        // Use cached device list instead of blocking enumeration
         let devices = &self.cached_devices;
 
-        let mut device_names: Vec<Option<String>> = vec![None]; // None = Default
+        let mut device_names: Vec<Option<String>> = vec![None];
         for dev in devices {
             device_names.push(Some(dev.name.clone()));
         }
 
-        // Find selected index
         let selected_idx = match &self.selected_device {
             None => 0,
             Some(name) => device_names.iter().position(|d| d.as_deref() == Some(name)).unwrap_or(0),
@@ -223,7 +218,6 @@ pub fn spawn_tray(
                 Ok(handle) => {
                     info!("System tray icon active");
 
-                    // Listen for icon-theme changes and force tray icon refresh
                     let theme_handle = handle.clone();
                     tokio::spawn(async move {
                         if let Err(e) = listen_theme_changes(theme_handle).await {
@@ -231,7 +225,6 @@ pub fn spawn_tray(
                         }
                     });
 
-                    // Run the state/device update loop (blocks until tray is dropped)
                     run_tray_update_loop(handle, state_rx, backend_type).await;
                     break;
                 }
@@ -247,7 +240,6 @@ pub fn spawn_tray(
     })
 }
 
-/// Runs the tray state/device update loop until the tray handle is dropped.
 async fn run_tray_update_loop(
     handle: Handle<DictationTray>,
     mut state_rx: watch::Receiver<DaemonState>,
@@ -255,7 +247,6 @@ async fn run_tray_update_loop(
 ) {
     let mut refresh_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Skip the immediate first tick
     refresh_interval.tick().await;
 
     loop {
@@ -300,9 +291,6 @@ async fn run_tray_update_loop(
     }
 }
 
-/// Listen for icon-theme changes via dconf and force tray icon re-resolution.
-/// When lmtt switches themes (breeze ↔ breeze-dark), we invalidate the icon
-/// name to trigger ksni's NewIcon signal so waybar re-fetches from the new theme.
 async fn listen_theme_changes(handle: Handle<DictationTray>) -> anyhow::Result<()> {
     let connection = zbus::Connection::session().await?;
 
@@ -326,16 +314,13 @@ async fn listen_theme_changes(handle: Handle<DictationTray>) -> anyhow::Result<(
                     if let Ok((path, _, _)) = msg.body().deserialize::<(&str, Vec<&str>, &str)>() {
                         if path.contains("desktop/interface") {
                             info!("Icon theme changed, debouncing before refresh");
-                            // Debounce: wait for all gsettings keys to settle
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            // Drain any additional notifications that queued up
                             while let Ok(Some(_)) = tokio::time::timeout(
                                 std::time::Duration::from_millis(50),
                                 stream.next(),
                             )
                             .await
                             {}
-                            // Single invalidation cycle
                             handle
                                 .update(|tray| {
                                     tray.icon_invalidated = true;

@@ -1,21 +1,12 @@
-//! Voice Activity Detection module
-//!
-//! Provides VAD trait and implementations for detecting speech in audio.
-//! Includes both simple dB-threshold and Silero neural network detection.
-
 use anyhow::Result;
 use tracing::debug;
 
-/// Trait for voice activity detection implementations
 pub trait VoiceActivityDetector: Send + Sync {
-    /// Process audio samples and return true if speech is detected
     fn process(&mut self, samples: &[i16]) -> Result<bool>;
 
-    /// Reset internal state (call between recordings)
     fn reset(&mut self);
 }
 
-/// Simple dB-based VAD (always available)
 pub struct DbThresholdVad {
     threshold_db: f32,
 }
@@ -48,12 +39,9 @@ impl VoiceActivityDetector for DbThresholdVad {
         Ok(db > self.threshold_db)
     }
 
-    fn reset(&mut self) {
-        // No state to reset
-    }
+    fn reset(&mut self) {}
 }
 
-/// Silero VAD implementation using ONNX model
 pub mod silero {
     use super::*;
     use ort::session::{builder::GraphOptimizationLevel, Session};
@@ -62,42 +50,28 @@ pub mod silero {
     use std::path::Path;
     use tracing::warn;
 
-    /// Known SHA256 hash of silero_vad.onnx (v5.1 from master branch)
-    /// This can be updated if the upstream model changes
     const SILERO_VAD_SHA256: &str =
         "b73d9134cc9c86c5a0ac86082fbb74b10d926fe5d0b8a3dd0cee93aa3a2ef5f3";
 
-    /// Silero VAD detector using ONNX Runtime
     pub struct SileroVadDetector {
         session: Session,
         threshold: f32,
         #[allow(dead_code)]
         sample_rate: i64,
-        /// Internal state tensors for streaming
         state: Vec<f32>,
         sr_tensor: Vec<i64>,
-        /// Accumulated samples for batch processing
         buffer: Vec<f32>,
-        /// Minimum samples needed for VAD (512 for 16kHz, 256 for 8kHz)
         min_samples: usize,
     }
 
     impl SileroVadDetector {
-        /// Create a new Silero VAD detector
-        ///
-        /// # Arguments
-        /// * `model_path` - Path to the silero_vad.onnx model file
-        /// * `threshold` - Speech probability threshold (0.0-1.0, default 0.5)
-        /// * `sample_rate` - Audio sample rate (8000 or 16000)
         pub fn new(model_path: &Path, threshold: f32, sample_rate: u32) -> Result<Self> {
             let session = Session::builder()?
                 .with_optimization_level(GraphOptimizationLevel::Level3)?
                 .commit_from_file(model_path)?;
 
-            // Silero VAD requires specific chunk sizes
             let min_samples = if sample_rate == 8000 { 256 } else { 512 };
 
-            // Initialize state: h and c tensors (2, 1, 64)
             let state = vec![0.0f32; 2 * 64];
             let sr_tensor = vec![sample_rate as i64];
 
@@ -112,7 +86,6 @@ pub mod silero {
             })
         }
 
-        /// Verify SHA256 hash of a file
         fn verify_sha256(path: &Path, expected_hex: &str) -> Result<bool> {
             let bytes = std::fs::read(path)?;
             let mut hasher = Sha256::new();
@@ -122,11 +95,9 @@ pub mod silero {
             Ok(actual_hex == expected_hex)
         }
 
-        /// Download the Silero VAD model if not present
         pub fn ensure_model(model_dir: &Path) -> Result<std::path::PathBuf> {
             let model_path = model_dir.join("silero_vad.onnx");
             if model_path.exists() {
-                // Verify existing model's hash
                 match Self::verify_sha256(&model_path, SILERO_VAD_SHA256) {
                     Ok(true) => {
                         debug!("Silero VAD model verified: {:?}", model_path);
@@ -137,7 +108,6 @@ pub mod silero {
                             "Silero VAD model hash mismatch - re-downloading. \
                              This may indicate model corruption or an upstream update."
                         );
-                        // Remove corrupted/outdated file
                         let _ = std::fs::remove_file(&model_path);
                     }
                     Err(e) => {
@@ -149,14 +119,12 @@ pub mod silero {
 
             std::fs::create_dir_all(model_dir)?;
 
-            // Download from official Silero VAD releases
             let url = "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx";
             debug!("Downloading Silero VAD model from {}", url);
 
             let response = reqwest::blocking::get(url)?;
             let bytes = response.bytes()?;
 
-            // Verify downloaded content before saving
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             let result = hasher.finalize();
@@ -170,8 +138,6 @@ pub mod silero {
                      The upstream model may have been updated. Proceeding with caution.",
                     SILERO_VAD_SHA256, actual_hex
                 );
-                // Still save and use - warn user but don't fail
-                // This allows the system to work if upstream updates the model
             }
 
             std::fs::write(&model_path, &bytes)?;
@@ -180,7 +146,6 @@ pub mod silero {
             Ok(model_path)
         }
 
-        /// Convert i16 samples to f32 normalized
         fn samples_to_f32(samples: &[i16]) -> Vec<f32> {
             samples.iter().map(|&s| s as f32 / 32768.0).collect()
         }
@@ -188,20 +153,16 @@ pub mod silero {
 
     impl VoiceActivityDetector for SileroVadDetector {
         fn process(&mut self, samples: &[i16]) -> Result<bool> {
-            // Convert and accumulate samples
             self.buffer.extend(Self::samples_to_f32(samples));
 
-            // Process when we have enough samples
             if self.buffer.len() < self.min_samples {
-                return Ok(false); // Not enough data yet
+                return Ok(false);
             }
 
-            // Process in chunks of min_samples
             let mut speech_detected = false;
             while self.buffer.len() >= self.min_samples {
                 let chunk: Vec<f32> = self.buffer.drain(..self.min_samples).collect();
 
-                // Prepare input tensors as ort Values
                 let input_array = ndarray::Array2::from_shape_vec((1, self.min_samples), chunk)?;
                 let input_value = Value::from_array(input_array)?;
 
@@ -211,7 +172,6 @@ pub mod silero {
                 let sr_array = ndarray::Array1::from_vec(self.sr_tensor.clone());
                 let sr_value = Value::from_array(sr_array)?;
 
-                // Run inference
                 let inputs = ort::inputs![
                     "input" => input_value,
                     "state" => state_value,
@@ -220,7 +180,6 @@ pub mod silero {
 
                 match self.session.run(inputs) {
                     Ok(outputs) => {
-                        // Extract probability from output - ort 2.0 returns (&Shape, &[T])
                         if let Ok((_shape, data)) = outputs["output"].try_extract_tensor::<f32>() {
                             let prob_val = data[0];
                             if prob_val > self.threshold {
@@ -229,7 +188,6 @@ pub mod silero {
                             }
                         }
 
-                        // Update state from output
                         if let Ok((_shape, data)) = outputs["stateN"].try_extract_tensor::<f32>() {
                             self.state = data.to_vec();
                         }
@@ -250,7 +208,6 @@ pub mod silero {
     }
 }
 
-/// Create the appropriate VAD based on config
 pub fn create_vad(
     vad_enabled: bool,
     vad_threshold: f32,
@@ -258,7 +215,6 @@ pub fn create_vad(
     sample_rate: u32,
 ) -> Box<dyn VoiceActivityDetector> {
     if vad_enabled {
-        // Try to load Silero VAD
         let model_dir = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("voice-dictation")
@@ -266,9 +222,6 @@ pub fn create_vad(
 
         match silero::SileroVadDetector::ensure_model(&model_dir) {
             Ok(model_path) => {
-                // ort panics (instead of returning Err) when the ONNX Runtime
-                // library cannot be loaded. Catch it so the dB fallback below
-                // still applies.
                 let created = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     silero::SileroVadDetector::new(&model_path, vad_threshold, sample_rate)
                 }))
@@ -320,16 +273,13 @@ mod tests {
     #[test]
     fn test_db_threshold_vad_reset() {
         let mut vad = DbThresholdVad::new(-40.0);
-        vad.reset(); // Should not panic
+        vad.reset();
     }
 
     #[test]
     fn test_create_vad_returns_db_threshold() {
-        // Works whether Silero loads or falls back to the dB threshold (for
-        // example when the ONNX Runtime library is missing).
         let mut vad = create_vad(true, 0.5, -40.0, 16000);
 
-        // Test that it works like DbThresholdVad
         let silence = vec![0i16; 512];
         assert!(!vad.process(&silence).unwrap());
     }
@@ -338,14 +288,12 @@ mod tests {
     fn test_create_vad_disabled() {
         let mut vad = create_vad(false, 0.5, -40.0, 16000);
 
-        // Should still work (uses dB threshold)
         let silence = vec![0i16; 512];
         assert!(!vad.process(&silence).unwrap());
     }
 
     #[test]
     fn test_rms_calculation() {
-        // Test with known values
         let samples = vec![100i16; 100];
         let rms = DbThresholdVad::calculate_rms(&samples);
         assert!((rms - 100.0).abs() < 0.1);
@@ -353,11 +301,9 @@ mod tests {
 
     #[test]
     fn test_rms_to_db() {
-        // Full scale should be 0 dB
         let db = DbThresholdVad::rms_to_db(32768.0);
         assert!((db - 0.0).abs() < 0.1);
 
-        // Silence should be very negative
         let db = DbThresholdVad::rms_to_db(0.0);
         assert!(db < -90.0);
     }

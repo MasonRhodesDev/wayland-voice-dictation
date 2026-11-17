@@ -7,13 +7,12 @@ license.workspace = true
 
 [features]
 default = ["pipewire", "tray", "correction"]
-pipewire = ["dictation-engine/pipewire"]  # Native PipeWire audio backend
+pipewire = ["dictation-engine/pipewire"]
 tray = ["dictation-engine/tray"]
-correction = ["dictation-engine/correction"]  # AT-SPI2 correction learning
+correction = ["dictation-engine/correction"]
 
 [dependencies]
 dictation-engine = { path = "dictation-engine", default-features = false }
-# CLI management of the learned-corrections store (corrections list/remove/clear)
 correction-engine = { path = "correction-engine" }
 slint-gui = { path = "slint-gui" }
 test-loop-ui = { path = "test-loop-ui" }
@@ -35,8 +34,6 @@ members = [
 ]
 resolver = "2"
 
-# Single source of truth for the released version. spec Version, PKGBUILD
-# pkgver, and Cargo.lock must match — packaging/build-srpm.sh gates on it.
 [workspace.package]
 version = "0.7.1"
 license = "MIT OR Apache-2.0"

@@ -1,21 +1,3 @@
-//! Hosted OpenAI transcription engine (batch).
-//!
-//! Opt-in alternative to the local Parakeet engines, selected via the config
-//! model spec `openai:<model>` (e.g. `openai:gpt-transcribe`). Realtime models
-//! (`openai:gpt-live-transcribe`) use [`crate::openai_realtime_engine`] instead. Implements the
-//! push-based [`StreamingEngine`] contract directly:
-//!
-//! - `process_audio` buffers samples (like the local path).
-//! - No `Partial` events — batch transcription can't stream, so the preview
-//!   overlay stays quiet while speaking.
-//! - `finish()` uploads the full buffer as a WAV to the OpenAI transcription
-//!   endpoint on the tokio runtime and emits a single `Final` (or `Error`).
-//!
-//! The API key is read from `OPENAI_API_KEY` at construction; if it is absent
-//! the engine fails to construct and the selector stays on the default engine.
-//! There is **no** cross-engine fallback: a request failure surfaces as
-//! `TranscriptEvent::Error`.
-
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
@@ -29,30 +11,20 @@ use crate::stream_engine::{EngineError, EventStream, StreamingEngine, Transcript
 
 const TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 
-/// Most keywords sent with one request. The API documents no hard cap, and
-/// long lists dilute the hint, so keep it bounded.
 const MAX_KEYWORDS: usize = 100;
 
-/// `[openai]` config section. Strings are comma-separated lists so the
-/// schema-driven config TUI can edit and preserve them.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenAiConfig {
-    /// Free-text description of what you usually dictate.
     #[serde(default)]
     pub prompt: String,
-    /// Send user-dictionary words as `keywords` hints.
     #[serde(default = "default_true")]
     pub keywords_from_dictionary: bool,
-    /// Extra keyword hints, comma-separated.
     #[serde(default)]
     pub extra_keywords: String,
-    /// Expected input languages, comma-separated ISO codes (e.g. "en").
     #[serde(default)]
     pub languages: String,
-    /// Realtime latency/accuracy trade-off: minimal, low, medium, high, xhigh.
     #[serde(default = "default_delay")]
     pub delay: String,
-    /// Realtime transcription WebSocket endpoint.
     #[serde(default = "default_realtime_url")]
     pub realtime_url: String,
 }
@@ -80,7 +52,6 @@ impl Default for OpenAiConfig {
     }
 }
 
-/// Resolved request context shared by the batch and realtime engines.
 #[derive(Debug, Clone, Default)]
 pub struct OpenAiOptions {
     pub prompt: Option<String>,
@@ -88,12 +59,10 @@ pub struct OpenAiOptions {
     pub languages: Vec<String>,
     pub delay: String,
     pub realtime_url: String,
-    /// Batch endpoint override (tests, proxies). `None` uses the public API.
     pub transcriptions_url: Option<String>,
 }
 
 impl OpenAiConfig {
-    /// Build request options, folding in user-dictionary words when enabled.
     pub fn to_options(&self, dictionary_words: &[String]) -> OpenAiOptions {
         let mut keywords: Vec<String> = Vec::new();
         let mut push = |w: &str| {
@@ -131,12 +100,10 @@ impl OpenAiConfig {
     }
 }
 
-/// Models that accept `keywords` and `languages` (the 2026 transcription line).
 pub fn supports_context_lists(model: &str) -> bool {
     model.starts_with("gpt-transcribe") || model.starts_with("gpt-live-transcribe")
 }
 
-/// Models that accept a free-text `prompt`.
 pub fn supports_prompt(model: &str) -> bool {
     !model.contains("diarize")
 }
@@ -152,8 +119,6 @@ pub struct OpenAiEngine {
 }
 
 impl OpenAiEngine {
-    /// Construct the engine. Fails if `OPENAI_API_KEY` is unset/empty so the
-    /// selector can fall back to the default engine and log the reason.
     pub fn new(model: String, sample_rate: u32, options: OpenAiOptions) -> Result<Self> {
         let api_key = api_key_from_env()?;
 
@@ -196,7 +161,6 @@ impl StreamingEngine for OpenAiEngine {
         let event_tx = Arc::clone(&self.event_tx);
         let options = self.options.clone();
 
-        // Runs on the tokio runtime (finish() is called from the async daemon loop).
         tokio::spawn(async move {
             let event =
                 match transcribe(&client, &api_key, &model, &audio, sample_rate, &options).await {
@@ -230,21 +194,17 @@ impl StreamingEngine for OpenAiEngine {
         self.buffer.lock().map(|b| b.clone()).unwrap_or_default()
     }
 
-    /// Hosted output is already punctuated and cased, and vocabulary hints go
-    /// in as `keywords`, so the local helper chain is not needed.
     fn default_stages(&self) -> Vec<Stage> {
         Vec::new()
     }
 }
 
-/// Read `OPENAI_API_KEY`, failing if it is unset or empty.
 pub(crate) fn api_key_from_env() -> Result<String> {
     std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()).ok_or_else(|| {
         anyhow::anyhow!("OPENAI_API_KEY is not set; the openai engine cannot be used")
     })
 }
 
-/// POST the buffer as a WAV to the OpenAI transcription endpoint; return the text.
 pub(crate) async fn transcribe(
     client: &reqwest::Client,
     api_key: &str,
@@ -291,14 +251,12 @@ pub(crate) async fn transcribe(
         anyhow::bail!("HTTP {}: {}", status, body);
     }
 
-    // Default response_format is JSON: { "text": "..." }.
     let parsed: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("invalid transcription response: {e}: {body}"))?;
     let text = parsed.get("text").and_then(|t| t.as_str()).unwrap_or_default();
     Ok(text.to_string())
 }
 
-/// Encode i16 mono PCM as a 16-bit WAV in memory.
 fn encode_wav(samples: &[i16], sample_rate: u32) -> Result<Vec<u8>> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -336,7 +294,6 @@ mod tests {
             "lifemd".to_string(),
         ];
         let o = cfg.to_options(&dict);
-        // Case-insensitive dedupe keeps the first spelling; short and unsafe words drop.
         assert_eq!(o.keywords, vec!["WorkOS", "JWKS", "lifemd"]);
         assert_eq!(o.languages, vec!["en", "fr"]);
         assert_eq!(o.delay, "low");
@@ -362,7 +319,6 @@ mod tests {
     #[test]
     fn encode_wav_has_riff_header_and_data() {
         let wav = encode_wav(&[0, 1, -1, 100, -100], 16000).unwrap();
-        // RIFF/WAVE header + fmt + data chunk (44-byte header + 5*2 bytes).
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         assert_eq!(wav.len(), 44 + 5 * 2);
@@ -370,7 +326,6 @@ mod tests {
 
     #[test]
     fn new_fails_without_key() {
-        // Only meaningful when the key is absent in the test environment.
         if std::env::var("OPENAI_API_KEY").map(|k| k.is_empty()).unwrap_or(true) {
             assert!(OpenAiEngine::new("gpt-transcribe".into(), 16000, OpenAiOptions::default())
                 .is_err());

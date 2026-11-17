@@ -1,5 +1,3 @@
-//! Per-app behavioral settings derived from window class name
-
 use crate::post_processing::SanitizationRules;
 use crate::window_detect::AppCategory;
 
@@ -32,9 +30,8 @@ impl AppProfile {
         Self::for_category(category)
     }
 
-    #[allow(dead_code)] // planned per-app profiles
+    #[allow(dead_code)]
     pub fn detect() -> Self {
-        // Synchronous fallback using window_detect
         Self::for_category(AppCategory::General)
     }
 }

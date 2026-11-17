@@ -21,38 +21,23 @@ pub use sanitize::SanitizationRules;
 pub use stages::{PipelinePass, Stage, StageContext, StageSwitches, LOCAL_MODEL_STAGES};
 pub use word_substitution::WordSubstitutionProcessor;
 
-/// Trait for text post-processors.
-///
-/// Processors transform transcribed text by applying corrections,
-/// punctuation, capitalization, or other transformations.
 pub trait TextProcessor: Send + Sync {
-    /// Process the input text and return the transformed result.
     fn process(&self, text: &str) -> Result<String>;
 }
 
-/// Pipeline that orchestrates multiple text processors.
-///
-/// Processors are applied in sequence, with each processor
-/// receiving the output of the previous one.
 pub struct Pipeline {
     processors: Vec<Box<dyn TextProcessor>>,
 }
 
 impl Pipeline {
-    /// Create an empty pipeline.
     pub fn new() -> Self {
         Self { processors: Vec::new() }
     }
 
-    /// Add a processor to the pipeline.
     pub fn add_processor(&mut self, processor: Box<dyn TextProcessor>) {
         self.processors.push(processor);
     }
 
-    /// Create a pipeline from configuration.
-    ///
-    /// Enables processors based on configuration flags.
-    /// Processors are applied in order: acronyms → punctuation → word substitution → grammar.
     pub fn from_config(
         enable_acronyms: bool,
         enable_punctuation: bool,
@@ -69,12 +54,6 @@ impl Pipeline {
         )
     }
 
-    /// Create a pipeline from the legacy `enable_*` flags.
-    ///
-    /// Kept for callers that predate named stages. It resolves to the local
-    /// model stage chain filtered by the flags, so the result is identical to
-    /// the original hard-coded order: acronyms, punctuation, word
-    /// substitution, fuzzy vocabulary, grammar.
     #[allow(clippy::too_many_arguments)]
     pub fn from_config_with_dict(
         enable_acronyms: bool,
@@ -97,10 +76,6 @@ impl Pipeline {
         Self::from_stages(&stages, &ctx, PipelinePass::Final)
     }
 
-    /// Process text through all processors in the pipeline.
-    ///
-    /// Returns the final processed result, or the original text
-    /// if no processors are enabled.
     pub fn process(&self, text: &str) -> Result<String> {
         let mut result = text.to_string();
 
@@ -111,12 +86,10 @@ impl Pipeline {
         Ok(result)
     }
 
-    /// Check if the pipeline has any processors.
     pub fn is_empty(&self) -> bool {
         self.processors.is_empty()
     }
 
-    /// Number of processors in the pipeline.
     pub fn len(&self) -> usize {
         self.processors.len()
     }

@@ -1,6 +1,3 @@
-//! Captures the focused window at recording start and refocuses it before typing.
-//! Hyprland-only via hyprctl subprocess calls.
-
 use anyhow::Result;
 use std::time::Duration;
 use tracing::debug;
@@ -11,7 +8,6 @@ pub struct WindowTarget {
 }
 
 impl WindowTarget {
-    /// Capture the currently focused window. Returns None if hyprctl fails (graceful fallback).
     pub async fn capture() -> Option<Self> {
         let output = tokio::process::Command::new("hyprctl")
             .args(["activewindow", "-j"])
@@ -33,7 +29,6 @@ impl WindowTarget {
         Some(Self { address, class })
     }
 
-    /// Refocus the captured window before typing.
     pub async fn refocus(&self) -> Result<()> {
         let output = tokio::process::Command::new("hyprctl")
             .args(["dispatch", "focuswindow", &format!("address:{}", self.address)])
@@ -45,7 +40,6 @@ impl WindowTarget {
             anyhow::bail!("hyprctl focuswindow failed: {}", stderr);
         }
 
-        // Brief sleep for compositor to process the focus change
         tokio::time::sleep(Duration::from_millis(50)).await;
         Ok(())
     }

@@ -1,27 +1,3 @@
-//! Time-boxed `zwp_input_method_v2` diagnostic probe (daemon-as-IME prototype).
-//!
-//! Binds the compositor's input-method slot for a fixed number of seconds and
-//! logs every IME event delivered by the compositor (activate / deactivate /
-//! surrounding_text / text_change_cause / content_type / done / unavailable),
-//! tagging each with the focused window class from `hyprctl activewindow -j`.
-//!
-//! This exists to answer, live on a Hyprland session, whether the
-//! input-method-v2 read path (surrounding_text — correction detection) and
-//! write path (commit_string — in-place fixes) work against real clients
-//! (GTK/zenity, Chromium/Electron with `--enable-wayland-ime`, wezterm).
-//!
-//! Safety properties, by construction:
-//! - Time-boxed: the wayland connection is dropped when the deadline passes;
-//!   there is no daemon integration.
-//! - Never requests a keyboard grab (`grab_keyboard` is never called), so the
-//!   user's typing is unaffected while the probe runs.
-//! - `commit_string` is only ever sent when BOTH `--commit` and
-//!   `--commit-class` are given AND the focused window class matches
-//!   `--commit-class` exactly. Intended for throwaway targets
-//!   (e.g. `zenity --entry`) only.
-//! - If the compositor reports `unavailable` (another IME holds the slot),
-//!   the probe records that fact and exits immediately — no retry loop.
-
 use serde::Serialize;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
@@ -37,65 +13,36 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_v2::{Event as ImeEvent, ZwpInputMethodV2},
 };
 
-/// Options for a probe run.
 #[derive(Debug, Clone)]
 pub struct ProbeOptions {
-    /// How long to hold the IME slot before disconnecting.
     pub secs: u64,
-    /// Emit a machine-readable JSON summary on stdout (event lines go to
-    /// stderr in this mode).
     pub json: bool,
-    /// Text to commit into the focused editor for write-path validation.
-    /// Requires `commit_class`; only sent while a window of that class is
-    /// focused.
     pub commit_text: Option<String>,
-    /// Exact window class the commit is restricted to (safety gate).
     pub commit_class: Option<String>,
 }
 
-/// One observed protocol event (or probe action), tagged with wall-clock
-/// offset and the focused window at the time it was applied.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeRecord {
-    /// Milliseconds since probe start.
     pub t_ms: u64,
-    /// Focused window class per hyprctl at the surrounding `done`.
     pub class: Option<String>,
-    /// Focused window title per hyprctl.
     pub title: Option<String>,
     #[serde(flatten)]
     pub kind: RecordKind,
 }
 
-/// The event payload of a [`ProbeRecord`].
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum RecordKind {
     Activate,
     Deactivate,
-    SurroundingText {
-        text: String,
-        cursor: u32,
-        anchor: u32,
-    },
-    TextChangeCause {
-        cause: String,
-    },
-    ContentType {
-        hint: String,
-        purpose: String,
-    },
-    Done {
-        serial: u32,
-    },
+    SurroundingText { text: String, cursor: u32, anchor: u32 },
+    TextChangeCause { cause: String },
+    ContentType { hint: String, purpose: String },
+    Done { serial: u32 },
     Unavailable,
-    /// Probe-initiated commit_string + commit (not a compositor event).
-    Committed {
-        text: String,
-    },
+    Committed { text: String },
 }
 
-/// Snapshot of the last surrounding_text seen for a window class.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SurroundingSnapshot {
     pub text: String,
@@ -103,7 +50,6 @@ pub struct SurroundingSnapshot {
     pub anchor: u32,
 }
 
-/// Per-window-class findings, aggregated from the event stream.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ClassFindings {
     pub class: String,
@@ -111,39 +57,27 @@ pub struct ClassFindings {
     pub deactivations: u32,
     pub surrounding_text_events: u32,
     pub last_surrounding: Option<SurroundingSnapshot>,
-    /// Unique text_change_cause labels in order of first appearance.
     pub change_causes: Vec<String>,
-    /// Unique content_type labels ("hint / purpose") in order of first
-    /// appearance.
     pub content_types: Vec<String>,
 }
 
-/// Outcome of the (optional) commit_string write-path test.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CommitOutcome {
     pub text: String,
     pub target_class: String,
-    /// True if the probe actually sent commit_string (target was focused
-    /// while active).
     pub committed: bool,
-    /// True if a later surrounding_text for the same class contained the
-    /// committed text (full read-back round trip).
     pub roundtrip_confirmed: bool,
 }
 
-/// Machine-readable summary of a probe run.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ProbeSummary {
     pub duration_ms: u64,
-    /// The compositor refused the IME slot (another IME is bound).
     pub unavailable: bool,
     pub total_done_events: u32,
     pub per_class: Vec<ClassFindings>,
     pub commit_test: Option<CommitOutcome>,
 }
 
-/// Build the aggregate summary from the raw record stream. Pure function so
-/// it is unit-testable without a compositor.
 pub fn build_summary(
     records: &[ProbeRecord],
     duration_ms: u64,
@@ -224,8 +158,6 @@ pub fn build_summary(
     ProbeSummary { duration_ms, unavailable, total_done_events: total_done, per_class, commit_test }
 }
 
-/// Render a `WEnum` payload as a stable human label ("Other", "InputMethod",
-/// "unknown(7)", ...).
 fn wenum_label<T: std::fmt::Debug>(e: &WEnum<T>) -> String {
     match e {
         WEnum::Value(v) => format!("{v:?}"),
@@ -288,8 +220,6 @@ impl ProbeState {
         self.records.push(rec);
     }
 
-    /// Apply the pending (double-buffered) state on `done`, recording each
-    /// component tagged with the currently focused window.
     fn apply_done(&mut self, im: &ZwpInputMethodV2) {
         let (class, title) = focused_window();
         let pending = std::mem::take(&mut self.pending);
@@ -315,8 +245,6 @@ impl ProbeState {
         let serial = self.done_count;
         self.push(&class, &title, RecordKind::Done { serial });
 
-        // Write-path test: commit only once, only while active, and only if
-        // the focused window class matches the explicit safety gate.
         if !self.committed && self.active {
             if let (Some(text), Some(gate)) = (&self.commit_text, &self.commit_class) {
                 if class.as_deref() == Some(gate.as_str()) {
@@ -331,7 +259,6 @@ impl ProbeState {
     }
 }
 
-/// Focused window (class, title) from Hyprland, best-effort.
 fn focused_window() -> (Option<String>, Option<String>) {
     let Ok(out) = std::process::Command::new("hyprctl").args(["-j", "activewindow"]).output()
     else {
@@ -393,8 +320,6 @@ impl Dispatch<ZwpInputMethodV2, ()> for ProbeState {
     }
 }
 
-/// Run the probe. Blocks for up to `opts.secs` seconds, then prints a summary
-/// (JSON on stdout if `opts.json`).
 pub fn run(opts: ProbeOptions) -> anyhow::Result<()> {
     if opts.commit_text.is_some() && opts.commit_class.is_none() {
         anyhow::bail!("--commit requires --commit-class (safety gate)");
@@ -452,17 +377,14 @@ pub fn run(opts: ProbeOptions) -> anyhow::Result<()> {
             break;
         }
         let remaining = deadline - now;
-        // prepare_read is None when events are already pending; loop again.
         if let Some(guard) = queue.prepare_read() {
             let fd = guard.connection_fd().as_raw_fd();
             let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
             let timeout_ms = remaining.as_millis().min(250) as i32;
             let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
             if ret > 0 {
-                // Socket readable: pull events; dispatched on next loop turn.
                 let _ = guard.read();
             }
-            // ret == 0: timeout, guard dropped cancels the read.
         }
     }
 

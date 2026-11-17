@@ -2,8 +2,6 @@ use anyhow::Result;
 use tracing::info;
 use zbus::Connection;
 
-/// Holding the fd keeps the logind inhibit active. Dropping it (or the daemon
-/// exiting) closes the fd and releases the inhibit automatically.
 pub struct IdleInhibitor {
     _inhibit: logind_session::Inhibitor,
 }

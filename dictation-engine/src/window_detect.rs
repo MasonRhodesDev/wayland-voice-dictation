@@ -1,26 +1,14 @@
-//! Application category detection for context-aware text sanitization
-//!
-//! Currently provides manual configuration only.
-//! Future: Plugin system for compositor-specific detection.
-
-/// Categories of applications for sanitization rules
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppCategory {
-    /// Terminal emulators - need shell character escaping
     Terminal,
-    /// Web browsers - generally safe
     Browser,
-    /// Code editors - may need some escaping
     Editor,
-    /// Chat/messaging apps - generally safe
     Chat,
-    /// Everything else - minimal sanitization
     #[default]
     General,
 }
 
 impl AppCategory {
-    /// Parse from config string
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "terminal" | "term" => AppCategory::Terminal,
@@ -32,13 +20,8 @@ impl AppCategory {
     }
 }
 
-/// Get the application category for sanitization
-///
-/// Currently returns Terminal mode by default (escapes shell chars).
-/// Future: Plugin system for automatic detection.
-#[allow(dead_code)] // planned per-app profiles
+#[allow(dead_code)]
 pub async fn get_focused_app_category() -> AppCategory {
-    // Fallback when Hyprland/window detection isn't available
     AppCategory::General
 }
 

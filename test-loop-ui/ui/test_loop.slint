@@ -11,7 +11,6 @@ export component TestLoop inherits Window {
     height: 520px;
     background: #1e1e2e;
 
-    // Callbacks to Rust
     callback load-recording(int);
     callback navigate(int);  // -1 = prev, +1 = next
     callback select-word(int);
@@ -20,7 +19,6 @@ export component TestLoop inherits Window {
     callback add-hotword(string, float);
     callback apply-and-rerun();
 
-    // Properties set by Rust
     in property <string> recording-timestamp: "";
     in property <string> recording-duration: "";
     in property <string> recording-preview: "";
@@ -41,7 +39,6 @@ export component TestLoop inherits Window {
     in property <string> action-status: "";
     in property <bool> hotword-added: false;
 
-    // Picker screen
     picker := Rectangle {
         visible: !recording-loaded;
         background: #1e1e2e;
@@ -128,7 +125,6 @@ export component TestLoop inherits Window {
         }
     }
 
-    // Review screen
     review := Rectangle {
         visible: recording-loaded;
         background: #1e1e2e;
@@ -158,7 +154,6 @@ export component TestLoop inherits Window {
                 }
             }
 
-            // Word tiles area
             ScrollView {
                 height: 80px;
                 HorizontalLayout {
@@ -189,7 +184,6 @@ export component TestLoop inherits Window {
                 }
             }
 
-            // Metadata row
             HorizontalBox {
                 spacing: 16px;
                 alignment: start;
@@ -209,7 +203,6 @@ export component TestLoop inherits Window {
                 }
             }
 
-            // Re-run result (shown after re-run)
             Rectangle {
                 visible: has-rerun;
                 background: #1e2a1e;
@@ -243,7 +236,6 @@ export component TestLoop inherits Window {
                 clicked => { rerun-engine(); }
             }
 
-            // Correction panel (shown when word selected)
             Rectangle {
                 visible: selected-word-index >= 0;
                 background: #181825;
@@ -255,7 +247,6 @@ export component TestLoop inherits Window {
                     padding: 16px;
                     spacing: 10px;
 
-                    // Header: selected word
                     HorizontalBox {
                         spacing: 8px;
                         alignment: start;
@@ -289,7 +280,6 @@ export component TestLoop inherits Window {
                         }
                     }
 
-                    // Spoken form row (only relevant for substitution)
                     HorizontalBox {
                         spacing: 8px;
                         alignment: start;
@@ -308,12 +298,10 @@ export component TestLoop inherits Window {
                         }
                     }
 
-                    // Action buttons + status
                     HorizontalBox {
                         spacing: 8px;
                         alignment: start;
 
-                        // Enabled only when correction differs from spoken form
                         Button {
                             text: "Add Substitution + Re-run";
                             enabled: correction-text != spoken-form-text && correction-text != "";
@@ -333,7 +321,6 @@ export component TestLoop inherits Window {
                         }
                     }
 
-                    // Status / feedback line
                     Text {
                         text: action-status;
                         color: #a6e3a1;

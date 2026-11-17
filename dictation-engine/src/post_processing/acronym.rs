@@ -2,25 +2,14 @@ use super::TextProcessor;
 use anyhow::Result;
 use std::collections::HashSet;
 
-/// Acronym detection and conversion processor.
-///
-/// Converts letter-by-letter patterns to acronyms:
-/// - "a p i" → "API"
-/// - "h t t p" → "HTTP"
-/// - "u r l" → "URL"
-///
-/// Uses a curated dictionary of common acronyms plus pattern matching
-/// for generic 2-5 letter sequences.
 pub struct AcronymProcessor {
     known_acronyms: HashSet<String>,
 }
 
 impl AcronymProcessor {
-    /// Create a new acronym processor with curated dictionary.
     pub fn new() -> Self {
         let mut known_acronyms = HashSet::new();
 
-        // Programming & Web
         known_acronyms.insert("API".to_string());
         known_acronyms.insert("HTTP".to_string());
         known_acronyms.insert("HTTPS".to_string());
@@ -38,7 +27,6 @@ impl AcronymProcessor {
         known_acronyms.insert("SDK".to_string());
         known_acronyms.insert("IDE".to_string());
 
-        // File formats & protocols
         known_acronyms.insert("PDF".to_string());
         known_acronyms.insert("CSV".to_string());
         known_acronyms.insert("SVG".to_string());
@@ -54,7 +42,6 @@ impl AcronymProcessor {
         known_acronyms.insert("IP".to_string());
         known_acronyms.insert("DNS".to_string());
 
-        // Development tools & concepts
         known_acronyms.insert("GIT".to_string());
         known_acronyms.insert("NPM".to_string());
         known_acronyms.insert("CI".to_string());
@@ -68,7 +55,6 @@ impl AcronymProcessor {
         known_acronyms.insert("HDD".to_string());
         known_acronyms.insert("USB".to_string());
 
-        // Common tech acronyms
         known_acronyms.insert("AI".to_string());
         known_acronyms.insert("ML".to_string());
         known_acronyms.insert("NLP".to_string());
@@ -94,7 +80,6 @@ impl TextProcessor for AcronymProcessor {
         let mut i = 0;
 
         while i < words.len() {
-            // Try to match an acronym pattern starting at position i
             if let Some((acronym, consumed)) = self.try_match_acronym(&words[i..]) {
                 result.push(acronym);
                 i += consumed;
@@ -109,19 +94,14 @@ impl TextProcessor for AcronymProcessor {
 }
 
 impl AcronymProcessor {
-    /// Try to match an acronym pattern starting from the beginning of the slice.
-    ///
-    /// Returns (acronym_string, number_of_words_consumed) if successful.
     fn try_match_acronym(&self, words: &[&str]) -> Option<(String, usize)> {
         if words.is_empty() {
             return None;
         }
 
-        // Try to match 2-5 letter sequences
         for length in (2..=5.min(words.len())).rev() {
             let candidate_words = &words[..length];
 
-            // Check if all words are single characters (letters)
             if !candidate_words
                 .iter()
                 .all(|w| w.len() == 1 && w.chars().next().unwrap().is_alphabetic())
@@ -129,11 +109,9 @@ impl AcronymProcessor {
                 continue;
             }
 
-            // Build the acronym
             let acronym: String =
                 candidate_words.iter().map(|w| w.to_uppercase()).collect::<Vec<_>>().join("");
 
-            // Check if it's in our known acronyms dictionary
             if self.known_acronyms.contains(&acronym) {
                 return Some((acronym, length));
             }
@@ -192,7 +170,6 @@ mod tests {
     fn test_no_false_positives() {
         let processor = AcronymProcessor::new();
         let result = processor.process("i want a p e n").unwrap();
-        // "a p e n" is not a known acronym, so should stay as-is
         assert_eq!(result, "i want a p e n");
     }
 

@@ -7,9 +7,7 @@ Type=notify
 ExecStart=/usr/bin/voice-dictation daemon
 Restart=on-failure
 RestartSec=5
-# Exit code 64 = UI reload requested, should trigger restart
 RestartForceExitStatus=64
-# Watchdog timeout: systemd will kill and restart if no keepalive received within 30s
 WatchdogSec=30
 Environment="RUST_LOG=info"
 Environment="GUI_LOG=info"

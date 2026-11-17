@@ -4,25 +4,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-/// Manages user-defined words for spell checking.
-///
-/// Combines application-specific words with system Hunspell personal dictionary.
-/// Supports hot-reload via file watching.
 pub struct UserDictionary {
-    /// Application-specific words (read-write)
     app_words: Arc<RwLock<HashSet<String>>>,
-    /// System Hunspell personal dictionary words (read-only, but reloadable)
     system_words: Arc<RwLock<HashSet<String>>>,
-    /// Path to application word list
     app_words_path: PathBuf,
-    /// Path to system Hunspell dictionary (if available)
     system_dict_path: Option<PathBuf>,
 }
 
 impl UserDictionary {
-    /// Create an empty user dictionary (fallback for initialization failures).
-    ///
-    /// Used when normal initialization fails but we still need a working dictionary.
     pub fn empty() -> Self {
         Self {
             app_words: Arc::new(RwLock::new(HashSet::new())),
@@ -32,20 +21,10 @@ impl UserDictionary {
         }
     }
 
-    /// Create new user dictionary.
-    ///
-    /// Loads from:
-    /// 1. ~/.local/share/voice-dictation/user_words.txt (app-specific)
-    /// 2. ~/.hunspell_LANG (system Hunspell personal dictionary)
     pub fn new() -> Result<Self> {
         Self::with_paths(Self::get_app_words_path()?, Self::get_hunspell_personal_dict_path())
     }
 
-    /// Create a user dictionary backed by explicit file paths.
-    ///
-    /// `app_words_path` is the read-write application word list; `system_dict_path`
-    /// is an optional read-only Hunspell personal dictionary. Used by `new()` with
-    /// the default locations, and by tests to avoid touching the real home directory.
     pub fn with_paths(app_words_path: PathBuf, system_dict_path: Option<PathBuf>) -> Result<Self> {
         let app_words = Self::load_app_words(&app_words_path)?;
 
@@ -63,9 +42,6 @@ impl UserDictionary {
         })
     }
 
-    /// Get paths to watch for changes.
-    ///
-    /// Returns vector of paths that should be monitored for dictionary updates.
     pub fn watch_paths(&self) -> Vec<PathBuf> {
         let mut paths = vec![self.app_words_path.clone()];
         if let Some(ref system_path) = self.system_dict_path {
@@ -74,18 +50,15 @@ impl UserDictionary {
         paths
     }
 
-    /// Check if word exists in user dictionaries.
     pub fn contains(&self, word: &str) -> bool {
         let word_lower = word.to_lowercase();
 
-        // Check app words
         if let Ok(app_words) = self.app_words.read() {
             if app_words.contains(&word_lower) {
                 return true;
             }
         }
 
-        // Check system words
         if let Ok(system_words) = self.system_words.read() {
             if system_words.contains(&word_lower) {
                 return true;
@@ -95,7 +68,6 @@ impl UserDictionary {
         false
     }
 
-    /// Add word to application dictionary.
     pub fn add(&self, word: &str) -> Result<()> {
         let word_lower = word.trim().to_lowercase();
 
@@ -103,18 +75,15 @@ impl UserDictionary {
             return Ok(());
         }
 
-        // Add to app words
         {
             let mut app_words =
                 self.app_words.write().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
             app_words.insert(word_lower);
         }
 
-        // Persist to disk
         self.save()
     }
 
-    /// Remove word from application dictionary.
     pub fn remove(&self, word: &str) -> Result<()> {
         let word_lower = word.to_lowercase();
 
@@ -127,7 +96,6 @@ impl UserDictionary {
         self.save()
     }
 
-    /// Get all words from application dictionary.
     pub fn app_words(&self) -> Vec<String> {
         self.app_words
             .read()
@@ -139,7 +107,6 @@ impl UserDictionary {
             .unwrap_or_default()
     }
 
-    /// Reload app-specific dictionary from disk.
     pub fn reload_app_words(&self) -> Result<()> {
         let words = Self::load_app_words(&self.app_words_path)?;
         let mut app_words =
@@ -148,7 +115,6 @@ impl UserDictionary {
         Ok(())
     }
 
-    /// Reload system Hunspell dictionary from disk.
     pub fn reload_system_words(&self) -> Result<()> {
         if let Some(ref path) = self.system_dict_path {
             let words = Self::load_system_words_from_path(path).unwrap_or_default();
@@ -159,14 +125,11 @@ impl UserDictionary {
         Ok(())
     }
 
-    /// Reload both dictionaries from disk.
     pub fn reload_all(&self) -> Result<()> {
         self.reload_app_words()?;
         self.reload_system_words()?;
         Ok(())
     }
-
-    // Private methods
 
     fn get_app_words_path() -> Result<PathBuf> {
         let data_dir = dirs::data_dir()
@@ -174,7 +137,6 @@ impl UserDictionary {
 
         let path = data_dir.join("voice-dictation").join("user_words.txt");
 
-        // Ensure directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -203,10 +165,7 @@ impl UserDictionary {
             .lines()
             .map(|line| line.trim())
             .filter(|line| !line.is_empty() && !line.starts_with('*'))
-            .map(|line| {
-                // Remove affixation suffix (e.g., "word/flag" -> "word")
-                line.split('/').next().unwrap_or(line).to_lowercase()
-            })
+            .map(|line| line.split('/').next().unwrap_or(line).to_lowercase())
             .collect();
 
         Ok(words)
@@ -217,7 +176,6 @@ impl UserDictionary {
 
         let home = dirs::home_dir()?;
 
-        // Try environment variables for locale
         let locale = env::var("DICTIONARY")
             .or_else(|_| env::var("LC_ALL"))
             .or_else(|_| env::var("LC_MESSAGES"))
@@ -232,7 +190,6 @@ impl UserDictionary {
             }
         }
 
-        // Fallback to default
         let default_path = home.join(".hunspell_default");
         if default_path.exists() {
             Some(default_path)
@@ -260,7 +217,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Dictionary backed by a tempdir — tests must never touch the real home directory.
     fn make_dict(dir: &TempDir) -> UserDictionary {
         UserDictionary::with_paths(dir.path().join("user_words.txt"), None).unwrap()
     }
@@ -280,7 +236,7 @@ mod tests {
 
         dict.add("testword").unwrap();
         assert!(dict.contains("testword"));
-        assert!(dict.contains("TestWord")); // Case insensitive
+        assert!(dict.contains("TestWord"));
     }
 
     #[test]
@@ -339,12 +295,10 @@ mod tests {
         let dict = UserDictionary::with_paths(dir.path().join("user_words.txt"), Some(system_path))
             .unwrap();
 
-        // Affix flags stripped, lowercased, '*' lines skipped
         assert!(dict.contains("hyprland"));
         assert!(dict.contains("wayland"));
         assert!(!dict.contains("ignored"));
 
-        // System words are not part of the app word list
         assert!(dict.app_words().is_empty());
     }
 

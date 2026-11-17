@@ -11,8 +11,6 @@ use zbus::Connection;
 
 mod utils;
 
-// Well-known bus name (live). Interface is com.voicedictation.Control.
-// Do not rename: CLI, keybinds, and other clients depend on this name.
 const DBUS_SERVICE_NAME: &str = "com.voicedictation.Daemon";
 const DBUS_OBJECT_PATH: &str = "/com/voicedictation/Control";
 const DBUS_INTERFACE_NAME: &str = "com.voicedictation.Control";
@@ -63,16 +61,19 @@ enum Commands {
                       and processed text with timings. Use it to compare engines on one clip."
     )]
     TranscribeFile {
-        /// Path to a 16 kHz mono 16-bit WAV
+        #[arg(help = "Path to a 16 kHz mono 16-bit WAV")]
         wav: PathBuf,
-        /// Model spec override, e.g. parakeet:default or openai:gpt-live-transcribe
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Model spec override, e.g. parakeet:default or openai:gpt-live-transcribe"
+        )]
         model: Option<String>,
-        /// Stage list override, e.g. "acronyms,punctuation" or "none"
-        #[arg(long)]
+        #[arg(long, help = "Stage list override, e.g. \"acronyms,punctuation\" or \"none\"")]
         stages: Option<String>,
-        /// Feed audio at speaking speed so partial and final timings match live use
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Feed audio at speaking speed so partial and final timings match live use"
+        )]
         paced: bool,
     },
     #[command(about = "Debug recording tools (requires VOICE_DICTATION_DEBUG_AUDIO=1)")]
@@ -86,8 +87,7 @@ enum Commands {
     DownloadModel,
     #[command(about = "Open the test loop UI for iterative transcription improvement")]
     TestLoop {
-        /// Path to a specific recording WAV file (defaults to most recent)
-        #[arg(long)]
+        #[arg(long, help = "Path to a specific recording WAV file (defaults to most recent)")]
         recording: Option<String>,
     },
     #[command(
@@ -479,7 +479,6 @@ fn validate_and_prompt_models(_config_path: &PathBuf) -> Result<(), Box<dyn std:
         fs::create_dir_all(&models_dir)?;
     }
 
-    // Check Parakeet model
     let parakeet_dir = models_dir.join("parakeet");
     if !parakeet_dir.join("encoder-model.onnx").exists()
         || !parakeet_dir.join("decoder_joint-model.onnx").exists()
@@ -492,15 +491,12 @@ fn validate_and_prompt_models(_config_path: &PathBuf) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-// Embed schema in binary for installation
 const CONFIG_SCHEMA: &str = include_str!("../config-schema.json");
 
-// Embed UI examples for installation
 const UI_STYLE1_EXAMPLE: &str = include_str!("../slint-gui/ui/examples/style1-default.slint");
 const UI_STYLE2_EXAMPLE: &str = include_str!("../slint-gui/ui/examples/style2-minimal.slint");
 const UI_EXAMPLES_README: &str = include_str!("../slint-gui/ui/examples/README.md");
 
-/// Migrate old config format to Parakeet-only format
 fn migrate_config(config_path: &PathBuf) -> Result<bool, Box<dyn std::error::Error>> {
     if !config_path.exists() {
         return Ok(false);
@@ -508,7 +504,6 @@ fn migrate_config(config_path: &PathBuf) -> Result<bool, Box<dyn std::error::Err
 
     let content = fs::read_to_string(config_path)?;
 
-    // Check if migration is needed (old format has vosk/whisper references or muxer fields)
     let has_old_format = content.lines().any(|line| {
         let line = line.trim();
         line.starts_with("transcription_engine")
@@ -520,7 +515,6 @@ fn migrate_config(config_path: &PathBuf) -> Result<bool, Box<dyn std::error::Err
             || line.starts_with("muxer_")
     });
 
-    // Check if models reference vosk or whisper
     let has_vosk_whisper_model = content.lines().any(|line| {
         let line = line.trim();
         (line.starts_with("preview_model") || line.starts_with("final_model"))
@@ -533,7 +527,6 @@ fn migrate_config(config_path: &PathBuf) -> Result<bool, Box<dyn std::error::Err
 
     println!("Migrating config to Parakeet-only format...");
 
-    // Remove old fields and update model references
     let mut new_lines: Vec<String> = Vec::new();
     let mut updated_preview = false;
     let mut updated_final = false;
@@ -541,7 +534,6 @@ fn migrate_config(config_path: &PathBuf) -> Result<bool, Box<dyn std::error::Err
     for line in content.lines() {
         let trimmed = line.trim();
 
-        // Skip deprecated fields
         if trimmed.starts_with("transcription_engine")
             || trimmed.starts_with("preview_model_custom_path")
             || trimmed.starts_with("final_model_custom_path")
@@ -554,7 +546,6 @@ fn migrate_config(config_path: &PathBuf) -> Result<bool, Box<dyn std::error::Err
             continue;
         }
 
-        // Update preview_model to parakeet
         if trimmed.starts_with("preview_model")
             && !trimmed.contains("custom_path")
             && (trimmed.contains("vosk:") || trimmed.contains("whisper:"))
@@ -564,7 +555,6 @@ fn migrate_config(config_path: &PathBuf) -> Result<bool, Box<dyn std::error::Err
             continue;
         }
 
-        // Update final_model to parakeet
         if trimmed.starts_with("final_model")
             && !trimmed.contains("custom_path")
             && (trimmed.contains("vosk:") || trimmed.contains("whisper:"))
@@ -577,7 +567,6 @@ fn migrate_config(config_path: &PathBuf) -> Result<bool, Box<dyn std::error::Err
         new_lines.push(line.to_string());
     }
 
-    // Write migrated config
     let new_content = new_lines.join("\n");
     fs::write(config_path, &new_content)?;
 
@@ -599,7 +588,6 @@ fn open_config() -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(&config_dir)?;
     }
 
-    // Initialize UI examples directory
     let ui_examples_dir = config_dir.join("ui/examples");
     if !ui_examples_dir.exists() {
         fs::create_dir_all(&ui_examples_dir)?;
@@ -612,10 +600,8 @@ fn open_config() -> Result<(), Box<dyn std::error::Error>> {
         fs::write(&config_path, "")?;
     }
 
-    // Migrate old config format if needed
     migrate_config(&config_path)?;
 
-    // Install/update schema from embedded version
     fs::write(&schema_path, CONFIG_SCHEMA)?;
 
     let mut tui =
@@ -727,9 +713,6 @@ fn debug_play(filename: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// One-command validation of the wezterm correction backend plumbing:
-/// socket discovery, pane listing, active-pane selection, get-text.
-/// Strictly read-only against the running wezterm.
 fn debug_wezterm_probe() -> Result<(), Box<dyn std::error::Error>> {
     use correction_engine::wezterm::{discover_socket, WeztermCli, WeztermClient};
 
@@ -776,8 +759,6 @@ fn debug_wezterm_probe() -> Result<(), Box<dyn std::error::Error>> {
 fn corrections_command(command: CorrectionCommands) -> Result<(), Box<dyn std::error::Error>> {
     use correction_engine::{CorrectionStore, MonitorConfig};
 
-    // Only the store/substitution paths matter for CLI use; the monitor
-    // settings are irrelevant here.
     let config = MonitorConfig::default();
 
     match command {
@@ -833,7 +814,6 @@ fn corrections_command(command: CorrectionCommands) -> Result<(), Box<dyn std::e
         CorrectionCommands::Edit => {
             let corrections_path = &config.store_path;
             if !corrections_path.exists() {
-                // Create empty file
                 if let Some(dir) = corrections_path.parent() {
                     fs::create_dir_all(dir)?;
                 }
@@ -897,8 +877,6 @@ fn dict_command(command: DictCommands) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Extract the spoken part of a `spoken -> replacement` line, normalized to
-/// lowercase words. Returns None for comments, blanks, and malformed lines.
 fn parse_substitution_spoken(line: &str) -> Option<Vec<String>> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains("->") {
@@ -997,9 +975,6 @@ fn subst_command(command: SubstCommands) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-/// Find all `voice-dictation` executables on `$PATH`, deduplicated by their
-/// canonical target. Returns the PATH-order entries so the first one (the one
-/// that actually wins) is listed first.
 fn binaries_on_path(name: &str) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     let mut seen_canonical: Vec<PathBuf> = Vec::new();
@@ -1022,9 +997,6 @@ fn binaries_on_path(name: &str) -> Vec<PathBuf> {
     found
 }
 
-/// Ask the session bus which PID owns the daemon's well-known name, then
-/// resolve that PID's executable via /proc. Returns None if the daemon isn't
-/// running or the PID can't be resolved.
 async fn get_daemon_pid() -> Option<u32> {
     let connection = Connection::session().await.ok()?;
     let proxy = zbus::Proxy::new(
@@ -1043,10 +1015,6 @@ fn daemon_exe() -> Option<PathBuf> {
     fs::read_link(format!("/proc/{}/exe", pid)).ok()
 }
 
-/// Print a "Binary consistency" section: warn when more than one
-/// `voice-dictation` is on PATH (PATH order silently picks the winner) and when
-/// the running daemon is a different binary than this client (stale daemon after
-/// an install). This is the most common cause of "the keybind does nothing".
 fn check_binary_consistency() {
     println!("\nBinary consistency:");
     println!("  Version: {}", env!("CARGO_PKG_VERSION"));
@@ -1088,14 +1056,12 @@ fn diagnose() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== Voice Dictation Diagnostics ===\n");
 
-    // Audio devices
     println!("Audio Input Devices:");
     for dev in utils::list_audio_devices() {
         let marker = if dev.is_default { " (default)" } else { "" };
         println!("  {}{}", dev.description, marker);
     }
 
-    // Backend and config
     println!("\nConfiguration ({}):", config_path.display());
     if config_path.exists() {
         let config = fs::read_to_string(&config_path)?;
@@ -1118,10 +1084,8 @@ fn diagnose() -> Result<(), Box<dyn std::error::Error>> {
         println!("  (config file not found - using defaults)");
     }
 
-    // Engine availability
     println!("\nAvailable engines: {}", utils::get_engine_summary());
 
-    // Check Parakeet model
     let models_dir = PathBuf::from(&home).join(".config/voice-dictation/models/parakeet");
     let encoder_exists = models_dir.join("encoder-model.onnx").exists();
     let decoder_exists = models_dir.join("decoder_joint-model.onnx").exists();
@@ -1130,7 +1094,6 @@ fn diagnose() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Encoder:   {}", if encoder_exists { "found" } else { "MISSING" });
     println!("  Decoder:   {}", if decoder_exists { "found" } else { "MISSING" });
 
-    // Debug audio status
     let debug_enabled = std::env::var("VOICE_DICTATION_DEBUG_AUDIO")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false);
