@@ -1185,7 +1185,6 @@ async fn daemon() -> Result<()> {
                         DaemonCommand::Restart => {
                             info!("Received Restart command");
                             restart_requested = true;
-                            let _ = gui_control_tx.send(GuiControl::Exit);
                             break;
                         }
                         DaemonCommand::SnapshotCorrection => corrections.snapshot(),
@@ -1290,8 +1289,6 @@ async fn daemon() -> Result<()> {
                             if let Some(task) = preview_task.take() {
                                 let _ = task.await;
                             }
-
-                            let _ = gui_control_tx.send(GuiControl::Exit);
                             break;
                         }
                         DaemonCommand::SwitchDevice(name) => {
