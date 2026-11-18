@@ -102,6 +102,15 @@ impl TrayModel {
             warn!("Tray: failed to send command: {e}");
         }
     }
+
+    pub fn activate(&mut self, commands: &mpsc::Sender<DaemonCommand>) {
+        let command = match self.state {
+            DaemonState::Idle => DaemonCommand::StartRecording,
+            DaemonState::Recording => DaemonCommand::Confirm,
+            DaemonState::Processing => return,
+        };
+        self.perform(TrayAction::Daemon(command), commands);
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +259,19 @@ mod tests {
             Some(DaemonCommand::SwitchDevice(None))
         );
         assert_eq!(devices_entry(&model).1, 0);
+    }
+
+    #[test]
+    fn clicking_the_icon_starts_confirms_or_does_nothing() {
+        for (state, expected) in [
+            (DaemonState::Idle, Some(DaemonCommand::StartRecording)),
+            (DaemonState::Recording, Some(DaemonCommand::Confirm)),
+            (DaemonState::Processing, None),
+        ] {
+            let (commands, mut received) = mpsc::channel(1);
+            model(state).activate(&commands);
+            assert_eq!(received.try_recv().ok(), expected, "{state}");
+        }
     }
 
     #[test]

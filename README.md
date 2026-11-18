@@ -118,7 +118,8 @@ voice-dictation download-model
 ```
 
 `make install` puts the binary in `~/.local/bin` and loads a LaunchAgent
-(`com.voicedictation.daemon`) that keeps the daemon running and logs to
+(`com.voicedictation.daemon`) that runs the daemon at login, restarts it after a crash or
+**Restart Daemon** but not after **Quit**, and logs to
 `~/Library/Logs/voice-dictation.log`. On first start macOS asks for two permissions for
 that binary under System Settings > Privacy & Security: **Microphone** and
 **Accessibility**. Grant both, then restart the daemon with
