@@ -150,9 +150,7 @@ fn create_overlay(
     let instance = match shown {
         Ok(instance) => instance,
         Err(e) => {
-            error!("Overlay window could not be created: {e}");
-            let _ = gui_status_tx.try_send(GuiStatus::Error(e));
-            return;
+            return give_up(&gui_status_tx, format!("Overlay window could not be created: {e}"))
         }
     };
 
@@ -170,17 +168,16 @@ fn create_overlay(
         });
     });
 
+    let scheduling_status_tx = gui_status_tx.clone();
     let attached = slint::spawn_local(async move {
         let window = match pending.window().winit_window().await {
             Ok(winit_window) => ns_window(&winit_window),
             Err(e) => {
-                error!("Overlay window was not created: {e}");
-                None
+                return give_up(&gui_status_tx, format!("Overlay window was not created: {e}"))
             }
         };
         let Some(window) = window else {
-            let _ = gui_status_tx.try_send(GuiStatus::Error("overlay has no AppKit window".into()));
-            return;
+            return give_up(&gui_status_tx, "Overlay has no AppKit window".to_string());
         };
         configure(&window);
         OVERLAY.with_borrow_mut(|overlay| {
@@ -195,8 +192,14 @@ fn create_overlay(
         tick();
     });
     if let Err(e) = attached {
-        error!("Overlay window setup could not be scheduled: {e}");
+        give_up(&scheduling_status_tx, format!("Overlay window setup could not be scheduled: {e}"));
     }
+}
+
+fn give_up(gui_status_tx: &mpsc::Sender<GuiStatus>, reason: String) {
+    error!("{reason}");
+    let _ = gui_status_tx.try_send(GuiStatus::Error(reason));
+    let _ = gui_status_tx.try_send(GuiStatus::ShuttingDown);
 }
 
 fn ns_window(winit_window: &Window) -> Option<Retained<NSWindow>> {
@@ -219,7 +222,6 @@ fn configure(window: &NSWindow) {
             | NSWindowCollectionBehavior::IgnoresCycle,
     );
     window.setIgnoresMouseEvents(true);
-    window.setHasShadow(false);
 }
 
 fn place(window: &NSWindow, mtm: MainThreadMarker) {
