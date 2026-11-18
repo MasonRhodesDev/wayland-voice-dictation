@@ -24,7 +24,12 @@ impl AppProfile {
             | "org.wezfurlong.wezterm"
             | "com.mitchellh.ghostty"
             | "ghostty"
-            | "tmux" => AppCategory::Terminal,
+            | "tmux"
+            | "com.apple.Terminal"
+            | "com.googlecode.iterm2"
+            | "net.kovidgoyal.kitty"
+            | "org.alacritty"
+            | "com.github.wez.wezterm" => AppCategory::Terminal,
             _ => AppCategory::General,
         };
         Self::for_category(category)
@@ -33,5 +38,30 @@ impl AppProfile {
     #[allow(dead_code)]
     pub fn detect() -> Self {
         Self::for_category(AppCategory::General)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_terminal_bundle_ids_type_slowly() {
+        for bundle_id in [
+            "com.apple.Terminal",
+            "com.googlecode.iterm2",
+            "net.kovidgoyal.kitty",
+            "org.alacritty",
+            "com.github.wez.wezterm",
+            "com.mitchellh.ghostty",
+        ] {
+            let profile = AppProfile::from_window_class(bundle_id);
+            assert_eq!(profile.category, AppCategory::Terminal, "{bundle_id}");
+            assert!(profile.word_delay_ms > 0, "{bundle_id}");
+        }
+        assert_eq!(
+            AppProfile::from_window_class("com.apple.Safari").category,
+            AppCategory::General
+        );
     }
 }

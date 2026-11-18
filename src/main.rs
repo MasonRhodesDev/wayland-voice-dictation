@@ -297,7 +297,7 @@ fn confirm_recording() -> Result<(), Box<dyn std::error::Error>> {
     require_daemon()?;
 
     let state = get_state()?;
-    if state != DaemonState::Recording {
+    if state == DaemonState::Processing {
         eprintln!("Not in recording state (current: {})", state);
         return Err("Invalid state".into());
     }

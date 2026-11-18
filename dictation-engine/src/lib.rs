@@ -25,6 +25,7 @@ pub mod openai_realtime_engine;
 pub mod parakeet_engine;
 pub mod platform;
 pub mod post_processing;
+mod resample;
 pub mod stream_engine;
 pub mod user_dictionary;
 pub mod vad;
@@ -651,8 +652,8 @@ impl Drop for ProcessingGuard {
 pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
 
@@ -995,9 +996,7 @@ pub async fn run() -> Result<()> {
                             engine.reset();
                             let session_engine = Arc::clone(engine);
 
-                            gui_control_tx.send(GuiControl::SetListening).map_err(|e| {
-                                anyhow::anyhow!("Failed to send SetListening: {}", e)
-                            })?;
+                            let _ = gui_control_tx.send(GuiControl::SetListening);
 
                             session = Some(RecordingSession {
                                 start_time: Instant::now(),
@@ -1182,6 +1181,9 @@ pub async fn run() -> Result<()> {
                             break;
                         }
                         DaemonCommand::SnapshotCorrection => corrections.snapshot(),
+                        DaemonCommand::Confirm => {
+                            debug!("Ignoring Confirm in Idle state (no recording was queued)");
+                        }
                         _ => {
                             warn!("Ignoring unexpected command in Idle state");
                         }
@@ -1313,9 +1315,7 @@ pub async fn run() -> Result<()> {
                     });
                 }
 
-                gui_control_tx
-                    .send(GuiControl::SetTranscribing)
-                    .map_err(|e| anyhow::anyhow!("Failed to send SetTranscribing: {}", e))?;
+                let _ = gui_control_tx.send(GuiControl::SetTranscribing);
 
                 let mut processing_guard = ProcessingGuard::new(gui_control_tx.clone());
 
@@ -1448,22 +1448,16 @@ pub async fn run() -> Result<()> {
                         focus_target.as_ref().map(|t| t.class()).unwrap_or_default(),
                     );
 
-                    gui_control_tx
-                        .send(GuiControl::SetClosing)
-                        .map_err(|e| anyhow::anyhow!("Failed to send SetClosing: {}", e))?;
+                    let _ = gui_control_tx.send(GuiControl::SetClosing);
 
                     tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
                 } else {
                     info!("No text to type");
-                    gui_control_tx
-                        .send(GuiControl::SetClosing)
-                        .map_err(|e| anyhow::anyhow!("Failed to send SetClosing: {}", e))?;
+                    let _ = gui_control_tx.send(GuiControl::SetClosing);
                     tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
                 }
 
-                gui_control_tx
-                    .send(GuiControl::SetHidden)
-                    .map_err(|e| anyhow::anyhow!("Failed to send SetHidden: {}", e))?;
+                let _ = gui_control_tx.send(GuiControl::SetHidden);
                 processing_guard.disarm();
 
                 let _ = device_manager.stop();
