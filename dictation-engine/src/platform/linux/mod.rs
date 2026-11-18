@@ -9,6 +9,7 @@ mod keyboard;
 mod tray;
 
 use anyhow::{Context, Result};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use systemd::daemon::{notify, STATE_READY, STATE_WATCHDOG};
@@ -59,16 +60,29 @@ pub fn notify_watchdog() -> Result<()> {
     Ok(())
 }
 
+pub fn run_daemon<F, Fut>(daemon: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>>,
+{
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("Failed to build the tokio runtime")?
+        .block_on(daemon())
+}
+
 pub fn spawn_overlay(
     gui_control_tx: broadcast::Sender<GuiControl>,
     spectrum_tx: broadcast::Sender<Vec<f32>>,
     gui_status_tx: mpsc::Sender<GuiStatus>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> bool {
     let runtime_handle = tokio::runtime::Handle::current();
-    Some(tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let _ =
             slint_gui::run_integrated(gui_control_tx, spectrum_tx, gui_status_tx, runtime_handle);
-    }))
+    });
+    true
 }
 
 pub fn copy_to_clipboard(text: &str) -> Result<bool> {

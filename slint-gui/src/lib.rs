@@ -1,8 +1,7 @@
 use dictation_types::{GuiControl, GuiState, GuiStatus};
 use hypr_slint_runtime::{IdleScheduler, WaitDecision, WakeHandle};
-use layer_shika::prelude::*;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use slint_interpreter::Value;
+use slint_interpreter::{ComponentDefinition, ComponentInstance, Value};
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,8 +10,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
+#[cfg(target_os = "linux")]
+mod layer_shell;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "linux")]
 mod monitor;
+#[cfg(any(target_os = "macos", test))]
+mod placement;
 
+#[cfg(target_os = "linux")]
+pub use layer_shell::run_integrated;
+#[cfg(target_os = "macos")]
+pub use macos::{attach_overlay, init, quit, run_on_ui_thread, run_until_quit};
+#[cfg(target_os = "linux")]
 pub use monitor::get_active_monitor_sync;
 
 pub struct SharedState {
@@ -29,6 +40,7 @@ struct UiClock {
     wake: WakeHandle,
     generation: Mutex<u64>,
     changed: Condvar,
+    #[cfg(target_os = "linux")]
     empty_since: Mutex<Option<Instant>>,
 }
 
@@ -38,6 +50,7 @@ impl UiClock {
             wake,
             generation: Mutex::new(0),
             changed: Condvar::new(),
+            #[cfg(target_os = "linux")]
             empty_since: Mutex::new(None),
         })
     }
@@ -47,28 +60,6 @@ impl UiClock {
         let mut generation = self.generation.lock().expect("UI clock poisoned");
         *generation = generation.wrapping_add(1);
         self.changed.notify_one();
-    }
-
-    fn note_surface_count(&self, count: usize) {
-        let mut empty_since = self.empty_since.lock().expect("surface deadline poisoned");
-        match (count, empty_since.is_some()) {
-            (0, false) => *empty_since = Some(Instant::now()),
-            (1.., true) => *empty_since = None,
-            _ => {}
-        }
-        drop(empty_since);
-        self.changed.notify_one();
-    }
-
-    fn next_maintenance(&self, now: Instant) -> Option<Duration> {
-        let topology = monitor::pending_compositor_change()
-            .map(|changed| changed + COMPOSITOR_SETTLE)
-            .map(|deadline| deadline.saturating_duration_since(now));
-        let surfaces = *self.empty_since.lock().expect("surface deadline poisoned");
-        let surfaces = surfaces
-            .map(|empty| empty + SURFACE_LOSS_GRACE)
-            .map(|deadline| deadline.saturating_duration_since(now));
-        [topology, surfaces].into_iter().flatten().min()
     }
 }
 
@@ -92,17 +83,6 @@ fn get_ui_config_dir() -> Option<PathBuf> {
         path.push(".config/voice-dictation/ui");
         path
     })
-}
-
-fn resolve_ui_path(name: &str) -> String {
-    if let Some(config_dir) = get_ui_config_dir() {
-        let config_path = config_dir.join(format!("{}.slint", name));
-        if config_path.exists() {
-            return config_path.to_string_lossy().to_string();
-        }
-    }
-
-    format!("ui/{}.slint", name)
 }
 
 fn spawn_ui_file_watcher(reload_flag: Arc<AtomicBool>, clock: Arc<UiClock>) {
@@ -157,77 +137,6 @@ fn spawn_ui_file_watcher(reload_flag: Arc<AtomicBool>, clock: Arc<UiClock>) {
 }
 
 pub type GuiResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-pub fn run_integrated(
-    gui_control_tx: broadcast::Sender<GuiControl>,
-    spectrum_tx: broadcast::Sender<Vec<f32>>,
-    gui_status_tx: mpsc::Sender<GuiStatus>,
-    runtime_handle: tokio::runtime::Handle,
-) -> GuiResult<()> {
-    info!("Starting slint-gui (integrated mode)");
-
-    let shared_state = Arc::new(RwLock::new(SharedState::default()));
-
-    let (wake_sender, wake_receiver) = layer_shika::calloop::channel::channel();
-    let wake = WakeHandle::new(move || {
-        let _ = wake_sender.send(());
-    });
-    let clock = UiClock::new(wake);
-    let mut wake_receiver = Some(wake_receiver);
-
-    let reload_flag = Arc::new(AtomicBool::new(false));
-
-    let gui_control_rx = gui_control_tx.subscribe();
-    let spectrum_rx = spectrum_tx.subscribe();
-
-    spawn_channel_listener(
-        gui_control_rx,
-        spectrum_rx,
-        shared_state.clone(),
-        gui_status_tx.clone(),
-        runtime_handle.clone(),
-        clock.clone(),
-    );
-
-    let monitor_clock = clock.clone();
-    monitor::spawn_active_monitor_listener(Arc::new(move || monitor_clock.signal()));
-
-    spawn_ui_file_watcher(reload_flag.clone(), clock.clone());
-
-    spawn_ui_clock(shared_state.clone(), clock.clone());
-
-    info!("Creating Wayland layer shell (this may take a few seconds)...");
-    let mut backoff = Duration::from_secs(1);
-    loop {
-        match run_shell(
-            shared_state.clone(),
-            reload_flag.clone(),
-            gui_status_tx.clone(),
-            clock.clone(),
-            &mut wake_receiver,
-        ) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.to_lowercase().contains("platform") {
-                    error!(
-                        "Shell creation failed after Slint platform init ({msg}); \
-                         exiting for systemd restart"
-                    );
-                    std::process::exit(EXIT_CODE_SURFACES_LOST);
-                }
-
-                error!("Failed to create shell: {msg}; retrying in {}s", backoff.as_secs());
-                let _ = gui_status_tx.blocking_send(GuiStatus::Error(format!(
-                    "Wayland layer shell initialization failed: {msg}. Retrying in {}s.",
-                    backoff.as_secs()
-                )));
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(Duration::from_secs(30));
-            }
-        }
-    }
-}
 
 fn spawn_channel_listener(
     mut gui_control_rx: broadcast::Receiver<GuiControl>,
@@ -417,12 +326,6 @@ fn state_to_mode(state: GuiState) -> i32 {
 
 const EXIT_CODE_RELOAD: i32 = 64;
 
-const EXIT_CODE_SURFACES_LOST: i32 = 1;
-
-const SURFACE_LOSS_GRACE: Duration = Duration::from_secs(10);
-
-const COMPOSITOR_SETTLE: Duration = Duration::from_secs(3);
-
 const REQUIRED_UI_PROPERTIES: &[&str] = &[
     "mode",
     "spinner-angle",
@@ -434,12 +337,21 @@ const REQUIRED_UI_PROPERTIES: &[&str] = &[
     "closing-progress",
 ];
 
-fn validate_ui_contract(ui_file: &str) -> std::result::Result<(), String> {
+fn compile_ui(
+    ui_file: &str,
+    source: Option<String>,
+    component: Option<&str>,
+) -> std::result::Result<ComponentDefinition, String> {
     let compiler = slint_interpreter::Compiler::default();
     let result = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(|e| format!("could not start UI validation runtime: {e}"))?
-        .block_on(compiler.build_from_path(ui_file));
+        .block_on(async {
+            match source {
+                Some(source) => compiler.build_from_source(source, PathBuf::from(ui_file)).await,
+                None => compiler.build_from_path(ui_file).await,
+            }
+        });
 
     let errors: Vec<String> = result
         .diagnostics()
@@ -450,11 +362,19 @@ fn validate_ui_contract(ui_file: &str) -> std::result::Result<(), String> {
         return Err(format!("UI '{ui_file}' failed to compile: {}", errors.join("; ")));
     }
 
-    let component =
-        result.components().next().ok_or_else(|| format!("UI '{ui_file}' defines no component"))?;
+    match component {
+        Some(name) => result.component(name),
+        None => result.components().next(),
+    }
+    .ok_or_else(|| format!("UI '{ui_file}' defines no component"))
+}
 
+fn check_ui_contract(
+    ui_file: &str,
+    definition: &ComponentDefinition,
+) -> std::result::Result<(), String> {
     let present: std::collections::HashSet<String> =
-        component.properties().map(|(name, _)| name.replace('-', "_")).collect();
+        definition.properties().map(|(name, _)| name.replace('-', "_")).collect();
     let missing: Vec<&str> = REQUIRED_UI_PROPERTIES
         .iter()
         .copied()
@@ -462,239 +382,92 @@ fn validate_ui_contract(ui_file: &str) -> std::result::Result<(), String> {
         .collect();
     if !missing.is_empty() {
         return Err(format!(
-            "UI '{ui_file}' is missing required input properties {missing:?} — it has drifted \
+            "UI '{ui_file}' is missing required input properties {missing:?}; it has drifted \
              from the Rust property contract. Add them (see slint-gui/ui/dictation.slint)."
         ));
     }
     Ok(())
 }
 
-fn run_shell(
-    shared_state: Arc<RwLock<SharedState>>,
-    reload_flag: Arc<AtomicBool>,
-    gui_status_tx: mpsc::Sender<GuiStatus>,
-    clock: Arc<UiClock>,
-    wake_receiver: &mut Option<layer_shika::calloop::channel::Channel<()>>,
-) -> GuiResult<()> {
-    let ui_file = resolve_ui_path("dictation");
-    info!("Loading UI from: {}", ui_file);
+struct Spinner {
+    angle: f32,
+    last_frame: Instant,
+}
 
-    if let Err(e) = validate_ui_contract(&ui_file) {
+impl Spinner {
+    fn new(now: Instant) -> Self {
+        Self { angle: 0.0, last_frame: now }
+    }
+
+    fn advance(&mut self, state: GuiState, now: Instant) -> f32 {
+        if state_has_visible_animation(state) {
+            self.angle =
+                (self.angle + 360.0 * now.duration_since(self.last_frame).as_secs_f32()) % 360.0;
+        }
+        self.last_frame = now;
+        self.angle
+    }
+}
+
+fn set_ui_property(component: &ComponentInstance, name: &str, value: Value) {
+    if let Err(e) = component.set_property(name, value) {
+        debug!("Failed to set {}: {}", name, e);
+    }
+}
+
+fn apply_state(
+    component: &ComponentInstance,
+    state: &SharedState,
+    is_active: bool,
+    spinner_angle: f32,
+) {
+    let mode = if is_active { state_to_mode(state.gui_state) } else { 0 };
+    set_ui_property(component, "mode", Value::Number(mode as f64));
+    if !is_active {
+        return;
+    }
+
+    set_ui_property(component, "spinner-angle", Value::Number(spinner_angle as f64));
+    set_ui_property(component, "progress", Value::Number(state.typing_progress as f64));
+
+    if state.gui_state == GuiState::Listening || state.gui_state == GuiState::PreListening {
+        let spectrum: [Value; 8] = std::array::from_fn(|band| {
+            Value::Number(state.spectrum_values.get(band).copied().unwrap_or(0.0) as f64)
+        });
+        set_ui_property(component, "spectrum", Value::Model(spectrum.into()));
+        set_ui_property(component, "text", Value::String(state.transcription.clone().into()));
+        set_ui_property(component, "pre-listening", Value::Bool(state.pre_listening));
+    }
+
+    set_ui_property(component, "fade", Value::Number(state.fade as f64));
+
+    if state.gui_state == GuiState::Closing {
+        set_ui_property(
+            component,
+            "closing-progress",
+            Value::Number(state.closing_progress as f64),
+        );
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn overlay_visible(state: GuiState) -> bool {
+    state_to_mode(state) != 0
+}
+
+#[cfg(any(target_os = "macos", test))]
+const DEFAULT_UI: &str = include_str!("../ui/dictation.slint");
+
+#[cfg(any(target_os = "macos", test))]
+fn compile_overlay(
+    ui_file: &str,
+    source: Option<String>,
+) -> std::result::Result<ComponentDefinition, String> {
+    let definition = compile_ui(ui_file, source, Some("Dictation"))?;
+    if let Err(e) = check_ui_contract(ui_file, &definition) {
         error!("UI contract validation failed: {e}");
-    } else {
-        info!("UI contract OK ({} required properties present)", REQUIRED_UI_PROPERTIES.len());
     }
-
-    info!("Creating Shell from UI file...");
-    let mut runtime = Shell::from_file(&ui_file)
-        .surface("Dictation")
-        .width(380)
-        .height(90)
-        .anchor(AnchorEdges::empty().with_bottom())
-        .margin((0, 0, 50, 0))
-        .layer(Layer::Overlay)
-        .keyboard_interactivity(KeyboardInteractivity::None)
-        .output_policy(OutputPolicy::AllOutputs)
-        .build()
-        .map_err(|e| format!("Failed to create shell: {}", e))?;
-
-    info!("Shell created successfully");
-
-    if let Err(e) = gui_status_tx.blocking_send(GuiStatus::Ready) {
-        error!("Failed to send ready status: {}", e);
-    } else {
-        info!("Sent Ready status to daemon - GUI is operational");
-    }
-
-    info!("Getting event loop handle...");
-    let event_loop = runtime.event_loop_handle();
-    info!("Got event loop handle");
-
-    let mut gui_initialized = false;
-    let mut last_logged_state: Option<GuiState> = None;
-    let mut spinner_angle: f32 = 0.0;
-    let mut last_frame = Instant::now();
-
-    let wake_for_callback = clock.wake.clone();
-    let clock_for_callback = clock.clone();
-    let wake_receiver = wake_receiver.take().ok_or("UI wake source was already consumed")?;
-    event_loop
-        .insert_source(wake_receiver, move |event, (), app_state| {
-            if !matches!(event, layer_shika::calloop::channel::Event::Msg(())) {
-                return;
-            }
-            wake_for_callback.acknowledge();
-
-            if reload_flag.load(Ordering::SeqCst) {
-                info!("UI file changed, reloading shell...");
-                reload_flag.store(false, Ordering::SeqCst);
-                std::process::exit(EXIT_CODE_RELOAD);
-            }
-
-            if let Some(changed_at) = monitor::pending_compositor_change() {
-                if changed_at.elapsed() >= COMPOSITOR_SETTLE {
-                    monitor::clear_compositor_change();
-                    if let Some(expected) = monitor::get_monitor_names_sync() {
-                        let present: std::collections::HashSet<String> = app_state
-                            .surfaces_with_keys()
-                            .filter_map(|(key, _)| {
-                                app_state
-                                    .get_output_info(key.output_handle)
-                                    .and_then(|info| info.name().map(|n| n.to_string()))
-                            })
-                            .collect();
-                        let missing: Vec<&String> =
-                            expected.iter().filter(|n| !present.contains(*n)).collect();
-                        if missing.is_empty() {
-                            info!(
-                                "Compositor change reconciled in place ({} surfaces, monitors {:?})",
-                                present.len(),
-                                expected
-                            );
-                        } else {
-                            error!(
-                                "Monitors {:?} have no overlay surface after compositor change, \
-                                 exiting for systemd restart",
-                                missing
-                            );
-                            std::process::exit(EXIT_CODE_SURFACES_LOST);
-                        }
-                    } else {
-                        debug!("Hyprland IPC unavailable, skipping surface verification");
-                    }
-                }
-            }
-
-            let surface_count = app_state.surfaces_with_keys().count();
-            if surface_count > 0 {
-                gui_initialized = true;
-                clock_for_callback.note_surface_count(surface_count);
-            } else if gui_initialized {
-                clock_for_callback.note_surface_count(0);
-                let expired = clock_for_callback
-                    .empty_since
-                    .lock()
-                    .expect("surface deadline poisoned")
-                    .is_some_and(|since| since.elapsed() >= SURFACE_LOSS_GRACE);
-                if expired {
-                    error!(
-                        "All layer surfaces lost for ~{}s after init, exiting for systemd restart",
-                        SURFACE_LOSS_GRACE.as_secs()
-                    );
-                    std::process::exit(EXIT_CODE_SURFACES_LOST);
-                }
-            }
-
-            let active_monitor = monitor::get_active_monitor();
-
-            if let Ok(state) = shared_state.read() {
-                if state_has_visible_animation(state.gui_state) {
-                    let now = Instant::now();
-                    spinner_angle =
-                        (spinner_angle + 360.0 * now.duration_since(last_frame).as_secs_f32())
-                            % 360.0;
-                    last_frame = now;
-                } else {
-                    last_frame = Instant::now();
-                }
-                if last_logged_state != Some(state.gui_state) {
-                    if state.gui_state != GuiState::Hidden {
-                        info!("GUI state -> {:?} (active_monitor={:?})", state.gui_state, active_monitor);
-                    } else {
-                        debug!("GUI state -> Hidden");
-                    }
-                    last_logged_state = Some(state.gui_state);
-                }
-
-                let use_all_monitors = active_monitor.is_none()
-                    || active_monitor.as_ref().is_some_and(|s| s.is_empty());
-                if use_all_monitors && state.gui_state != GuiState::Hidden {
-                    debug!("Monitor detection unavailable, showing GUI on all monitors");
-                }
-
-                for (key, surface_state) in app_state.surfaces_with_keys() {
-                    let component = surface_state.component_instance();
-
-                    let output_name = app_state.get_output_info(key.output_handle)
-                        .and_then(|info| info.name().map(|n| n.to_string()));
-
-                    let is_active = if use_all_monitors {
-                        state.gui_state != GuiState::Hidden
-                    } else if let Some(ref active_name) = active_monitor {
-                        output_name.as_ref()
-                            .map(|name| name == active_name)
-                            .unwrap_or(false)
-                    } else {
-                        app_state.get_output_info(key.output_handle)
-                            .map(|info| info.is_primary())
-                            .unwrap_or(false)
-                    };
-
-                    let mode = if is_active {
-                        state_to_mode(state.gui_state)
-                    } else {
-                        0
-                    };
-
-                    if let Err(e) = component.set_property("mode", Value::Number(mode as f64)) {
-                        debug!("Failed to set mode: {}", e);
-                    }
-
-                    if is_active {
-                        if let Err(e) = component.set_property("spinner-angle", Value::Number(spinner_angle as f64)) {
-                            debug!("Failed to set spinner-angle: {}", e);
-                        }
-                        if let Err(e) = component.set_property("progress", Value::Number(state.typing_progress as f64)) {
-                            debug!("Failed to set progress: {}", e);
-                        }
-
-                        if state.gui_state == GuiState::Listening || state.gui_state == GuiState::PreListening {
-                            let spectrum_values: [Value; 8] = [
-                                Value::Number(state.spectrum_values.first().copied().unwrap_or(0.0) as f64),
-                                Value::Number(state.spectrum_values.get(1).copied().unwrap_or(0.0) as f64),
-                                Value::Number(state.spectrum_values.get(2).copied().unwrap_or(0.0) as f64),
-                                Value::Number(state.spectrum_values.get(3).copied().unwrap_or(0.0) as f64),
-                                Value::Number(state.spectrum_values.get(4).copied().unwrap_or(0.0) as f64),
-                                Value::Number(state.spectrum_values.get(5).copied().unwrap_or(0.0) as f64),
-                                Value::Number(state.spectrum_values.get(6).copied().unwrap_or(0.0) as f64),
-                                Value::Number(state.spectrum_values.get(7).copied().unwrap_or(0.0) as f64),
-                            ];
-                            if let Err(e) = component.set_property("spectrum", Value::Model(spectrum_values.into())) {
-                                debug!("Failed to set spectrum: {}", e);
-                            }
-
-                            if let Err(e) = component.set_property("text", Value::String(state.transcription.clone().into())) {
-                                debug!("Failed to set text: {}", e);
-                            }
-
-                            if let Err(e) = component.set_property("pre-listening", Value::Bool(state.pre_listening)) {
-                                debug!("Failed to set pre-listening: {}", e);
-                            }
-                        }
-
-                        if let Err(e) = component.set_property("fade", Value::Number(state.fade as f64)) {
-                            debug!("Failed to set fade: {}", e);
-                        }
-
-                        if state.gui_state == GuiState::Closing {
-                            if let Err(e) = component.set_property("closing-progress", Value::Number(state.closing_progress as f64)) {
-                                debug!("Failed to set closing-progress: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-
-        })
-        .map_err(|e| format!("Failed to add UI wake source: {}", e))?;
-    clock.signal();
-
-    info!("Event-driven UI wake source ready; starting shell event loop");
-    info!("Starting shell event loop");
-    runtime.run().map_err(|e| format!("Shell run error: {}", e))?;
-
-    error!("Shell event loop exited unexpectedly, exiting for systemd restart");
-    std::process::exit(EXIT_CODE_SURFACES_LOST);
+    Ok(definition)
 }
 
 #[cfg(test)]
@@ -736,16 +509,57 @@ mod idle_tests {
     }
 
     #[test]
-    fn maintenance_deadlines_do_not_become_hidden_polling() {
-        let clock = UiClock::new(WakeHandle::new(|| {}));
-        assert_eq!(clock.next_maintenance(Instant::now()), None);
+    fn the_overlay_is_visible_in_every_state_but_hidden() {
+        assert!(!overlay_visible(GuiState::Hidden));
+        for state in [
+            GuiState::PreListening,
+            GuiState::Listening,
+            GuiState::Transcribing,
+            GuiState::Typing,
+            GuiState::Closing,
+        ] {
+            assert!(overlay_visible(state));
+        }
+    }
 
-        clock.note_surface_count(0);
-        let remaining = clock.next_maintenance(Instant::now()).expect("surface deadline");
-        assert!(remaining <= SURFACE_LOSS_GRACE);
-        assert!(remaining > Duration::from_secs(9));
+    #[test]
+    fn the_built_in_ui_keeps_the_full_property_contract() {
+        let definition = compile_overlay("dictation.slint", Some(DEFAULT_UI.to_string()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(check_ui_contract("dictation.slint", &definition), Ok(()));
+    }
 
-        clock.note_surface_count(1);
-        assert_eq!(clock.next_maintenance(Instant::now()), None);
+    #[test]
+    fn every_shipped_ui_loads_as_a_frameless_dictation_window() {
+        for (ui_file, source) in [
+            ("dictation.slint", DEFAULT_UI),
+            ("style1-default.slint", include_str!("../ui/examples/style1-default.slint")),
+            ("style2-minimal.slint", include_str!("../ui/examples/style2-minimal.slint")),
+        ] {
+            if let Err(e) = compile_overlay(ui_file, Some(source.to_string())) {
+                panic!("{e}");
+            }
+            assert!(source.contains("no-frame: true;"), "{ui_file} would show a title bar");
+        }
+    }
+
+    #[test]
+    fn a_ui_without_a_dictation_component_is_rejected() {
+        let other = "export component Other inherits Window {}".to_string();
+        let error = compile_overlay("other.slint", Some(other)).err().expect("no Dictation");
+        assert!(error.contains("other.slint"), "{error}");
+    }
+
+    #[test]
+    fn the_spinner_only_turns_while_an_animated_state_is_shown() {
+        let start = Instant::now();
+        let mut spinner = Spinner::new(start);
+        assert_eq!(spinner.advance(GuiState::Listening, start + Duration::from_millis(250)), 0.0);
+        assert_eq!(
+            spinner.advance(GuiState::Transcribing, start + Duration::from_millis(500)),
+            90.0
+        );
+        assert_eq!(spinner.advance(GuiState::Hidden, start + Duration::from_secs(5)), 90.0);
+        assert_eq!(spinner.advance(GuiState::Typing, start + Duration::from_secs(6)), 90.0);
     }
 }

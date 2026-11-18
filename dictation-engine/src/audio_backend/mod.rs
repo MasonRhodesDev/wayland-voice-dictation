@@ -185,7 +185,7 @@ fn list_devices_pactl() -> Result<Vec<DeviceInfo>> {
     Ok(devices)
 }
 
-fn list_devices_backend(backend_type: BackendType) -> Result<Vec<DeviceInfo>> {
+pub fn list_devices_backend(backend_type: BackendType) -> Result<Vec<DeviceInfo>> {
     match backend_type {
         BackendType::Auto | BackendType::Cpal => cpal_backend::CpalBackend::list_devices(),
         #[cfg(with_pipewire)]

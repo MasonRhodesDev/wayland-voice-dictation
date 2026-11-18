@@ -39,7 +39,7 @@ impl std::str::FromStr for DaemonState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonCommand {
     StartRecording,
     StopRecording,

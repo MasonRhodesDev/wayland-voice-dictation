@@ -126,8 +126,8 @@ that binary under System Settings > Privacy & Security: **Microphone** and
 need the permissions granted again.
 
 For push to talk, bind a hotkey tool to run `voice-dictation start` on key press and
-`voice-dictation confirm` on release, or `voice-dictation toggle` on a single key. The
-overlay and tray are Linux only. Media pause covers Music and Spotify.
+`voice-dictation confirm` on release, or `voice-dictation toggle` on a single key. Media
+pause covers Music and Spotify.
 
 ## Download the Model
 

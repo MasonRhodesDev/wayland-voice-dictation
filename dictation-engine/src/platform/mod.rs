@@ -23,19 +23,22 @@ mod utf16;
 mod correction;
 #[cfg(not(feature = "correction"))]
 mod no_correction;
-#[cfg(any(not(target_os = "linux"), not(feature = "tray")))]
+#[cfg(not(feature = "tray"))]
 mod no_tray;
 #[cfg(all(feature = "correction", any(target_os = "macos", test)))]
 mod text_edits;
+#[cfg(feature = "tray")]
+mod tray_menu;
 
 #[cfg(feature = "correction")]
 pub use correction::CorrectionLearning;
 pub use imp::{
     audio_hotplug_dir, check_runtime_dependencies, copy_to_clipboard, daemon_exe, daemon_running,
     inhibit_idle, missing_permissions, notify_ready, notify_watchdog, pause_media_if_playing,
-    request_permissions, resume_media, run_ime_probe, send_request, serve_control, spawn_overlay,
-    spawn_tray, type_text_with_progress, wezterm_install, ControlServer, FocusTarget,
-    IdleInhibitor, PausedMedia, SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
+    request_permissions, resume_media, run_daemon, run_ime_probe, send_request, serve_control,
+    spawn_overlay, spawn_tray, type_text_with_progress, wezterm_install, ControlServer,
+    FocusTarget, IdleInhibitor, PausedMedia, SERVICE_RESTART_HINT, SERVICE_START_HINT,
+    SERVICE_STATUS_HINT,
 };
 #[cfg(not(feature = "correction"))]
 pub use no_correction::CorrectionLearning;

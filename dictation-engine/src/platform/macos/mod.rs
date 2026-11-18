@@ -5,21 +5,26 @@ mod focus;
 mod keyboard;
 mod media;
 mod permissions;
+#[cfg(feature = "tray")]
+mod tray;
+mod ui;
 mod wezterm;
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use tokio::sync::{broadcast, mpsc};
 
 use crate::platform::ImeProbeOptions;
-use crate::{GuiControl, GuiStatus};
 
+#[cfg(not(feature = "tray"))]
 pub use super::no_tray::spawn_tray;
 pub use control::{daemon_exe, daemon_running, send_request, serve_control, ControlServer};
 pub use focus::FocusTarget;
 pub use keyboard::type_text_with_progress;
 pub use media::{pause_media_if_playing, resume_media, PausedMedia};
 pub use permissions::{missing_permissions, request_permissions};
+#[cfg(feature = "tray")]
+pub use tray::spawn_tray;
+pub use ui::{run_daemon, spawn_overlay};
 pub use wezterm::wezterm_install;
 
 pub const SERVICE_STATUS_HINT: &str =
@@ -47,14 +52,6 @@ pub fn notify_ready() -> Result<()> {
 
 pub fn notify_watchdog() -> Result<()> {
     Ok(())
-}
-
-pub fn spawn_overlay(
-    _gui_control_tx: broadcast::Sender<GuiControl>,
-    _spectrum_tx: broadcast::Sender<Vec<f32>>,
-    _gui_status_tx: mpsc::Sender<GuiStatus>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    None
 }
 
 pub fn copy_to_clipboard(_text: &str) -> Result<bool> {
