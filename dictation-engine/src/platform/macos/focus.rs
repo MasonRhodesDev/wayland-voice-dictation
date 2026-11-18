@@ -33,9 +33,7 @@ impl FocusTarget {
 
     pub async fn refocus(&self) -> Result<()> {
         let activated = NSRunningApplication::runningApplicationWithProcessIdentifier(self.pid)
-            .is_some_and(|app| {
-                app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows)
-            });
+            .is_some_and(|app| app.activateWithOptions(NSApplicationActivationOptions::empty()));
         if !activated {
             bail!("Could not activate {} (pid {})", self.class, self.pid);
         }
