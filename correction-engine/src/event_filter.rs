@@ -1,4 +1,4 @@
-use crate::types::{InjectionContext, MonitorConfig, TextChangeEvent};
+use crate::types::{InjectionContext, MonitorConfig, TextChangeEvent, TextChangeOp};
 use std::time::Duration;
 
 pub fn filter_events(
@@ -7,15 +7,46 @@ pub fn filter_events(
     config: &MonitorConfig,
 ) -> Vec<TextChangeEvent> {
     let injection_len = context.text.chars().count() as i32;
+
+    filter_app_events(events, context, config)
+        .into_iter()
+        .filter(|event| {
+            let event_end = event.start_pos + event.length;
+            event.start_pos <= injection_len && event_end >= 0
+        })
+        .collect()
+}
+
+pub fn filter_field_events(
+    events: &[TextChangeEvent],
+    context: &InjectionContext,
+    config: &MonitorConfig,
+) -> Vec<TextChangeEvent> {
+    let mut dictated_end_limit = context.text.chars().count();
+
+    filter_app_events(events, context, config)
+        .into_iter()
+        .filter(|event| {
+            let within =
+                usize::try_from(event.start_pos).is_ok_and(|start| start <= dictated_end_limit);
+            if within && event.operation == TextChangeOp::Insert {
+                dictated_end_limit += event.text.chars().count();
+            }
+            within
+        })
+        .collect()
+}
+
+fn filter_app_events(
+    events: &[TextChangeEvent],
+    context: &InjectionContext,
+    config: &MonitorConfig,
+) -> Vec<TextChangeEvent> {
     let monitor_duration = Duration::from_secs(config.monitor_duration_secs);
 
     events
         .iter()
         .filter(|event| event.timestamp.duration_since(context.instant) <= monitor_duration)
-        .filter(|event| {
-            let event_end = event.start_pos + event.length;
-            event.start_pos <= injection_len && event_end >= 0
-        })
         .filter(|event| {
             if context.window_class.is_empty() {
                 true

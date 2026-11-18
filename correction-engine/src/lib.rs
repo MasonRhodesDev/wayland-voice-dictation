@@ -8,7 +8,7 @@ pub mod wezterm;
 pub use connection::{AtspiConnection, MockTextChangeSource, TextChangeSource};
 pub use store::CorrectionStore;
 pub use types::{
-    CorrectionPair, CorrectionStats, InjectionContext, MonitorConfig, TextChangeEvent,
+    CorrectionPair, CorrectionStats, EventScope, InjectionContext, MonitorConfig, TextChangeEvent,
 };
 pub use wezterm::{WeztermMonitor, WEZTERM_WINDOW_CLASS};
 
@@ -107,14 +107,21 @@ impl CorrectionMonitor {
 
         info!("Monitoring window summary: {}", summarize_events(&events));
 
-        let filtered = event_filter::filter_events(&events, &context, &config);
+        let scope = source.event_scope();
+        let filtered = match scope {
+            EventScope::Field => event_filter::filter_field_events(&events, &context, &config),
+            EventScope::DictatedText => event_filter::filter_events(&events, &context, &config),
+        };
         debug!("After filtering: {} of {} events are relevant", filtered.len(), events.len());
 
         if filtered.is_empty() {
             return Ok(Vec::new());
         }
 
-        let corrections = diff::extract_corrections(&context, &filtered);
+        let corrections = match scope {
+            EventScope::Field => diff::extract_field_corrections(&context, &filtered),
+            EventScope::DictatedText => diff::extract_corrections(&context, &filtered),
+        };
 
         if corrections.is_empty() {
             debug!("No corrections extracted from events");

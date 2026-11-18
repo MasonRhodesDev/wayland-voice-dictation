@@ -276,4 +276,16 @@ mod tests {
         let text = format!("{} hello", "x".repeat(MAX_FIELD_LEN));
         assert!(EditTracker::locate(&text, "hello", APP.into()).is_none());
     }
+
+    #[test]
+    fn a_fix_after_a_whitespace_change_is_still_a_correction() {
+        let injected = "two words";
+        let mut tracker = EditTracker::locate(injected, injected, APP.into()).unwrap();
+        let start = Instant::now();
+
+        assert!(settled(&mut tracker, "two  words", start).is_empty());
+        let events = settled(&mut tracker, "two  word5", start + SETTLE * 2);
+
+        assert_eq!(pairs(injected, &events), [("words".to_string(), "word5".to_string())]);
+    }
 }

@@ -94,15 +94,48 @@ pub fn extract_corrections(
     context: &InjectionContext,
     events: &[TextChangeEvent],
 ) -> Vec<CorrectionPair> {
-    if context.text.is_empty() || events.is_empty() {
+    correction_pairs(context, &group_replacement_events(events))
+}
+
+pub fn extract_field_corrections(
+    context: &InjectionContext,
+    events: &[TextChangeEvent],
+) -> Vec<CorrectionPair> {
+    let mut span = DictatedSpan::new(0..context.text.chars().count());
+    let mut edits = Vec::new();
+
+    for replacement in group_replacement_events(events) {
+        let Ok(start) = usize::try_from(replacement.position) else {
+            continue;
+        };
+        let offset = span.edit(
+            start,
+            replacement.deleted_text.chars().count(),
+            replacement.inserted_text.chars().count(),
+        );
+        if !span.is_tracking() {
+            break;
+        }
+        if let Some(offset) = offset {
+            edits.push(ReplacementEvent { position: offset as i32, ..replacement });
+        }
+    }
+
+    correction_pairs(context, &edits)
+}
+
+fn correction_pairs(
+    context: &InjectionContext,
+    replacements: &[ReplacementEvent],
+) -> Vec<CorrectionPair> {
+    if context.text.is_empty() {
         return Vec::new();
     }
 
     let injection_len = context.text.chars().count() as i32;
-    let replacements = group_replacement_events(events);
     let mut corrections = Vec::new();
 
-    for replacement in &replacements {
+    for replacement in replacements {
         if replacement.position < 0 || replacement.position > injection_len {
             continue;
         }
