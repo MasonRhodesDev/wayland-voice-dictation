@@ -88,6 +88,12 @@ pub enum TextChangeOp {
     Delete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventScope {
+    Field,
+    DictatedText,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplacementEvent {
     pub deleted_text: String,

@@ -6,7 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
-use correction_engine::{InjectionContext, TextChangeEvent, TextChangeSource};
+use correction_engine::{EventScope, InjectionContext, TextChangeEvent, TextChangeSource};
 use objc2::rc::autoreleasepool;
 use objc2_app_kit::NSRunningApplication;
 use tokio::sync::mpsc;
@@ -58,6 +58,10 @@ impl TextChangeSource for AccessibilityText {
 
     fn is_available(&self) -> bool {
         accessibility_granted()
+    }
+
+    fn event_scope(&self) -> EventScope {
+        EventScope::DictatedText
     }
 }
 

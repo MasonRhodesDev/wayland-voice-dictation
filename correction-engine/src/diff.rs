@@ -2,9 +2,44 @@ use crate::types::{
     CorrectionPair, InjectionContext, ReplacementEvent, TextChangeEvent, TextChangeOp,
 };
 use chrono::Utc;
+use std::ops::Range;
 use std::time::Duration;
 
 const REPLACEMENT_GAP: Duration = Duration::from_secs(2);
+
+pub struct DictatedSpan(Option<Range<usize>>);
+
+impl DictatedSpan {
+    pub fn new(range: Range<usize>) -> Self {
+        Self(Some(range))
+    }
+
+    pub fn is_tracking(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub fn edit(&mut self, start: usize, deleted: usize, inserted: usize) -> Option<usize> {
+        let span = self.0.take()?;
+        let end = start + deleted;
+
+        if end <= span.start {
+            self.0 = Some(span.start - deleted + inserted..span.end - deleted + inserted);
+            return None;
+        }
+        if start >= span.end {
+            self.0 = Some(span);
+            return None;
+        }
+        let inside = start >= span.start && end <= span.end;
+        let whole = start == span.start && end == span.end;
+        if !inside || whole {
+            return None;
+        }
+
+        self.0 = Some(span.start..span.end - deleted + inserted);
+        Some(start - span.start)
+    }
+}
 
 pub fn group_replacement_events(events: &[TextChangeEvent]) -> Vec<ReplacementEvent> {
     let mut replacements = Vec::new();
@@ -59,15 +94,48 @@ pub fn extract_corrections(
     context: &InjectionContext,
     events: &[TextChangeEvent],
 ) -> Vec<CorrectionPair> {
-    if context.text.is_empty() || events.is_empty() {
+    correction_pairs(context, &group_replacement_events(events))
+}
+
+pub fn extract_field_corrections(
+    context: &InjectionContext,
+    events: &[TextChangeEvent],
+) -> Vec<CorrectionPair> {
+    let mut span = DictatedSpan::new(0..context.text.chars().count());
+    let mut edits = Vec::new();
+
+    for replacement in group_replacement_events(events) {
+        let Ok(start) = usize::try_from(replacement.position) else {
+            continue;
+        };
+        let offset = span.edit(
+            start,
+            replacement.deleted_text.chars().count(),
+            replacement.inserted_text.chars().count(),
+        );
+        if !span.is_tracking() {
+            break;
+        }
+        if let Some(offset) = offset {
+            edits.push(ReplacementEvent { position: offset as i32, ..replacement });
+        }
+    }
+
+    correction_pairs(context, &edits)
+}
+
+fn correction_pairs(
+    context: &InjectionContext,
+    replacements: &[ReplacementEvent],
+) -> Vec<CorrectionPair> {
+    if context.text.is_empty() {
         return Vec::new();
     }
 
     let injection_len = context.text.chars().count() as i32;
-    let replacements = group_replacement_events(events);
     let mut corrections = Vec::new();
 
-    for replacement in &replacements {
+    for replacement in replacements {
         if replacement.position < 0 || replacement.position > injection_len {
             continue;
         }

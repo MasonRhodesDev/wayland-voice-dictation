@@ -1,4 +1,4 @@
-use crate::types::{InjectionContext, TextChangeEvent, TextChangeOp};
+use crate::types::{EventScope, InjectionContext, TextChangeEvent, TextChangeOp};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -13,6 +13,10 @@ pub trait TextChangeSource: Send + Sync {
     ) -> Result<mpsc::Receiver<TextChangeEvent>>;
 
     fn is_available(&self) -> bool;
+
+    fn event_scope(&self) -> EventScope {
+        EventScope::Field
+    }
 }
 
 pub struct AtspiConnection {
@@ -122,13 +126,24 @@ pub struct MockTextChangeSource {
     tx: mpsc::Sender<TextChangeEvent>,
     rx: tokio::sync::Mutex<Option<mpsc::Receiver<TextChangeEvent>>>,
     available: bool,
+    scope: EventScope,
 }
 
 impl MockTextChangeSource {
     pub fn new(available: bool) -> (Self, mpsc::Sender<TextChangeEvent>) {
         let (tx, rx) = mpsc::channel(256);
-        let source = Self { tx: tx.clone(), rx: tokio::sync::Mutex::new(Some(rx)), available };
+        let source = Self {
+            tx: tx.clone(),
+            rx: tokio::sync::Mutex::new(Some(rx)),
+            available,
+            scope: EventScope::Field,
+        };
         (source, tx)
+    }
+
+    pub fn with_scope(mut self, scope: EventScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     pub fn sender(&self) -> mpsc::Sender<TextChangeEvent> {
@@ -148,5 +163,9 @@ impl TextChangeSource for MockTextChangeSource {
 
     fn is_available(&self) -> bool {
         self.available
+    }
+
+    fn event_scope(&self) -> EventScope {
+        self.scope
     }
 }
