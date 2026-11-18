@@ -187,6 +187,7 @@ impl CpalBackend {
             .map_err(|e| {
                 anyhow::anyhow!("Failed to create audio stream for '{}': {}", stream_id, e)
             })?;
+        stream.pause()?;
 
         info!("Created audio stream for: {}", stream_id);
 
