@@ -57,6 +57,7 @@ ksni = { git = "https://github.com/iovxw/ksni.git", rev = "4d2320c", optional = 
 correction-engine = { path = "../correction-engine", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+slint-gui = { path = "../slint-gui" }
 core-foundation = "0.9"
 core-graphics = "0.23"
 objc2 = "0.6"

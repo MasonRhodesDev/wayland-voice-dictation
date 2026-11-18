@@ -2,13 +2,12 @@ mod control;
 mod focus;
 mod keyboard;
 mod permissions;
+mod ui;
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use tokio::sync::{broadcast, mpsc};
 
 use crate::platform::ImeProbeOptions;
-use crate::{GuiControl, GuiStatus};
 
 pub use super::no_correction::CorrectionLearning;
 pub use super::no_tray::spawn_tray;
@@ -16,6 +15,7 @@ pub use control::{daemon_exe, daemon_running, send_request, serve_control, Contr
 pub use focus::FocusTarget;
 pub use keyboard::type_text_with_progress;
 pub use permissions::{missing_permissions, request_permissions};
+pub use ui::{run_daemon, spawn_overlay};
 
 pub const SERVICE_STATUS_HINT: &str =
     "launchctl print gui/$(id -u)/com.voicedictation.daemon (log: ~/Library/Logs/voice-dictation.log)";
@@ -48,14 +48,6 @@ pub fn notify_ready() -> Result<()> {
 
 pub fn notify_watchdog() -> Result<()> {
     Ok(())
-}
-
-pub fn spawn_overlay(
-    _gui_control_tx: broadcast::Sender<GuiControl>,
-    _spectrum_tx: broadcast::Sender<Vec<f32>>,
-    _gui_status_tx: mpsc::Sender<GuiStatus>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    None
 }
 
 pub fn copy_to_clipboard(_text: &str) -> Result<bool> {

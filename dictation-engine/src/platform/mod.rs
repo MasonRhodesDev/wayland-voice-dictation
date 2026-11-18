@@ -24,9 +24,9 @@ mod no_tray;
 pub use imp::{
     audio_hotplug_dir, check_runtime_dependencies, copy_to_clipboard, daemon_exe, daemon_running,
     inhibit_idle, missing_permissions, notify_ready, notify_watchdog, pause_media_if_playing,
-    request_permissions, resume_media, run_ime_probe, send_request, serve_control, spawn_overlay,
-    spawn_tray, type_text_with_progress, ControlServer, CorrectionLearning, FocusTarget,
-    IdleInhibitor, SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
+    request_permissions, resume_media, run_daemon, run_ime_probe, send_request, serve_control,
+    spawn_overlay, spawn_tray, type_text_with_progress, ControlServer, CorrectionLearning,
+    FocusTarget, IdleInhibitor, SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

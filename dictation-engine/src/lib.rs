@@ -648,8 +648,7 @@ impl Drop for ProcessingGuard {
     }
 }
 
-#[tokio::main]
-pub async fn run() -> Result<()> {
+pub fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -657,6 +656,10 @@ pub async fn run() -> Result<()> {
         )
         .init();
 
+    platform::run_daemon(daemon)
+}
+
+async fn daemon() -> Result<()> {
     info!("Starting Parakeet dictation engine");
 
     let config = load_config().unwrap_or_else(|e| {
@@ -812,7 +815,7 @@ pub async fn run() -> Result<()> {
 
     let gui_init_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut gui_available = false;
-    let mut channel_open = overlay.is_some();
+    let mut channel_open = overlay;
     if channel_open {
         info!("Waiting for GUI to initialize...");
     } else {
@@ -848,7 +851,7 @@ pub async fn run() -> Result<()> {
 
     health_state.gui_healthy.store(gui_available, Ordering::Relaxed);
 
-    if overlay.is_some() && !gui_available {
+    if overlay && !gui_available {
         info!("Running without visual overlay until the GUI reports ready");
     }
 
