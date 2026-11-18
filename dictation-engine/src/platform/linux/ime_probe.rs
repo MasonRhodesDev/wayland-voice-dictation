@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
+use crate::platform::ImeProbeOptions;
 use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, GlobalListContents},
@@ -12,14 +13,6 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
     zwp_input_method_v2::{Event as ImeEvent, ZwpInputMethodV2},
 };
-
-#[derive(Debug, Clone)]
-pub struct ProbeOptions {
-    pub secs: u64,
-    pub json: bool,
-    pub commit_text: Option<String>,
-    pub commit_class: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeRecord {
@@ -320,7 +313,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for ProbeState {
     }
 }
 
-pub fn run(opts: ProbeOptions) -> anyhow::Result<()> {
+pub fn run(opts: ImeProbeOptions) -> anyhow::Result<()> {
     if opts.commit_text.is_some() && opts.commit_class.is_none() {
         anyhow::bail!("--commit requires --commit-class (safety gate)");
     }

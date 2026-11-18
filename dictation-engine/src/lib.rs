@@ -5,59 +5,35 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use systemd::daemon::{notify, STATE_READY, STATE_WATCHDOG};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 mod app_profile;
 pub mod audio_backend;
 mod chunking;
+pub mod control;
 pub mod control_ipc;
 pub mod ctc_direct_engine;
 pub mod ctc_engine;
 pub mod ctc_features;
-pub mod dbus_control;
 pub mod debug_audio;
 pub mod engine;
 pub mod hotword_trie;
-mod idle_inhibit;
-pub mod ime_probe;
-mod keyboard;
 pub mod model_selector;
 pub mod openai_engine;
 pub mod openai_realtime_engine;
 pub mod parakeet_engine;
+pub mod platform;
 pub mod post_processing;
 pub mod stream_engine;
-#[cfg(feature = "tray")]
-mod tray;
 pub mod user_dictionary;
 pub mod vad;
 mod window_detect;
-mod window_target;
 
 pub use dictation_types::{GuiControl, GuiState, GuiStatus};
 
-fn pause_media_if_playing() -> bool {
-    let Ok(output) = std::process::Command::new("playerctl").arg("status").output() else {
-        return false;
-    };
-    let playing = String::from_utf8_lossy(&output.stdout).contains("Playing");
-    if playing {
-        let _ = std::process::Command::new("playerctl").arg("pause").output();
-        info!("Paused media playback");
-    }
-    playing
-}
-
-fn resume_media() {
-    let _ = std::process::Command::new("playerctl").arg("play").output();
-    info!("Resumed media playback");
-}
-
 use audio_backend::{AudioBackend, AudioBackendConfig, BackendType};
-use dbus_control::DaemonCommand;
-use keyboard::KeyboardInjector;
+use control::{ControlContext, DaemonCommand, DaemonState};
 use model_selector::{EngineOptions, ModelSpec, Provider};
 use openai_engine::OpenAiConfig;
 use post_processing::stages::{describe as describe_stages, resolve_stages};
@@ -67,8 +43,6 @@ use post_processing::{
 };
 use stream_engine::{StreamingEngine, TranscriptEvent};
 use user_dictionary::UserDictionary;
-
-use dbus_control::DaemonState;
 
 struct RecordingSession {
     #[allow(dead_code)]
@@ -186,6 +160,19 @@ struct DaemonConfig {
 
     #[serde(default = "default_correction_backend_wezterm")]
     correction_backend_wezterm: bool,
+}
+
+impl DaemonConfig {
+    fn correction_settings(&self) -> platform::CorrectionSettings {
+        platform::CorrectionSettings {
+            enabled: self.enable_correction_learning,
+            monitor_duration_secs: self.correction_monitor_duration_secs,
+            auto_promote_threshold: self.correction_auto_promote_threshold,
+            max_age_days: self.correction_max_age_days,
+            accessibility_bridge: self.enable_accessibility_bridge,
+            wezterm_backend: self.correction_backend_wezterm,
+        }
+    }
 }
 
 fn default_model() -> String {
@@ -349,48 +336,6 @@ async fn watch_substitution_file(word_sub: WordSubstitutionProcessor) -> Result<
                     warn!("Failed to reload substitutions: {}", e);
                 } else {
                     info!("Substitutions reloaded successfully");
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "correction")]
-async fn watch_corrections_file(
-    store: Arc<tokio::sync::Mutex<correction_engine::CorrectionStore>>,
-    path: std::path::PathBuf,
-) -> Result<()> {
-    info!("Watching corrections file: {:?}", path);
-
-    let (tx, mut rx) = mpsc::channel(100);
-
-    let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-        if let Ok(event) = res {
-            let _ = tx.blocking_send(event);
-        }
-    })?;
-
-    if path.exists() {
-        watcher.watch(&path, RecursiveMode::NonRecursive)?;
-    } else if let Some(parent) = path.parent() {
-        if parent.exists() {
-            watcher.watch(parent, RecursiveMode::NonRecursive)?;
-        }
-    }
-
-    while let Some(event) = rx.recv().await {
-        match event.kind {
-            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-                if event.paths.iter().any(|p| p == &path) =>
-            {
-                debug!("Corrections file changed: {:?}, reloading...", path);
-                if let Err(e) = store.lock().await.reload() {
-                    warn!("Failed to reload corrections store: {}", e);
-                } else {
-                    debug!("Corrections store reloaded from disk");
                 }
             }
             _ => {}
@@ -573,11 +518,17 @@ impl DeviceManager {
 
     fn spawn_device_watcher(&self) {
         let needs_recreate = Arc::clone(&self.needs_recreate);
+        let Some(snd_path) = platform::audio_hotplug_dir() else {
+            debug!("DeviceManager: no audio device directory to watch on this platform");
+            return;
+        };
 
         std::thread::spawn(move || {
-            let snd_path = std::path::Path::new("/dev/snd");
             if !snd_path.exists() {
-                warn!("DeviceManager: /dev/snd not found, device hotplug detection disabled");
+                warn!(
+                    "DeviceManager: {} not found, device hotplug detection disabled",
+                    snd_path.display()
+                );
                 return;
             }
 
@@ -603,11 +554,11 @@ impl DeviceManager {
             };
 
             if let Err(e) = watcher.watch(snd_path, RecursiveMode::NonRecursive) {
-                error!("DeviceManager: Failed to watch /dev/snd: {}", e);
+                error!("DeviceManager: Failed to watch {}: {}", snd_path.display(), e);
                 return;
             }
 
-            info!("DeviceManager: Watching /dev/snd for device changes");
+            info!("DeviceManager: Watching {} for device changes", snd_path.display());
 
             loop {
                 std::thread::sleep(Duration::from_secs(60));
@@ -792,123 +743,8 @@ pub async fn run() -> Result<()> {
         });
     }
 
-    #[cfg(feature = "correction")]
-    if config.daemon.enable_correction_learning && config.daemon.enable_accessibility_bridge {
-        match tokio::process::Command::new("gsettings")
-            .args(["get", "org.gnome.desktop.interface", "toolkit-accessibility"])
-            .output()
-            .await
-        {
-            Ok(output) => {
-                let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if current == "false" {
-                    info!("Enabling accessibility bridge (toolkit-accessibility → true)");
-                    let _ = tokio::process::Command::new("gsettings")
-                        .args([
-                            "set",
-                            "org.gnome.desktop.interface",
-                            "toolkit-accessibility",
-                            "true",
-                        ])
-                        .output()
-                        .await;
-                } else {
-                    debug!("Accessibility bridge already enabled");
-                }
-            }
-            Err(e) => {
-                warn!("Could not check accessibility bridge via gsettings: {} — correction detection may not work for GTK apps", e);
-            }
-        }
-    }
-
-    #[cfg(feature = "correction")]
-    let correction_monitor = if config.daemon.enable_correction_learning {
-        let vd_dir = xdg_paths::ConfigDirs::from_env()
-            .map(|d| d.data_dir("voice-dictation"))
-            .unwrap_or_default();
-        let monitor_config = correction_engine::MonitorConfig {
-            enabled: true,
-            monitor_duration_secs: config.daemon.correction_monitor_duration_secs,
-            auto_promote_threshold: config.daemon.correction_auto_promote_threshold,
-            max_age_days: config.daemon.correction_max_age_days,
-            store_path: vd_dir.join("corrections.json"),
-            substitutions_path: vd_dir.join("substitutions.txt"),
-        };
-        match correction_engine::CorrectionMonitor::new(monitor_config).await {
-            Ok(monitor) => {
-                if monitor.is_available() {
-                    info!("Correction learning enabled (AT-SPI2 available)");
-                } else {
-                    warn!("Correction learning enabled but AT-SPI2 bus unavailable — corrections will not be detected");
-                }
-                Some(monitor)
-            }
-            Err(e) => {
-                warn!("Failed to initialize correction monitor: {} — continuing without correction learning", e);
-                None
-            }
-        }
-    } else {
-        info!("Correction learning disabled");
-        None
-    };
-
-    #[cfg(feature = "correction")]
-    let wezterm_monitor =
-        if config.daemon.enable_correction_learning && config.daemon.correction_backend_wezterm {
-            let vd_dir = xdg_paths::ConfigDirs::from_env()
-                .map(|d| d.data_dir("voice-dictation"))
-                .unwrap_or_default();
-            let monitor_config = correction_engine::MonitorConfig {
-                enabled: true,
-                monitor_duration_secs: config.daemon.correction_monitor_duration_secs,
-                auto_promote_threshold: config.daemon.correction_auto_promote_threshold,
-                max_age_days: config.daemon.correction_max_age_days,
-                store_path: vd_dir.join("corrections.json"),
-                substitutions_path: vd_dir.join("substitutions.txt"),
-            };
-            let monitor = match correction_monitor.as_ref() {
-                Some(atspi_monitor) => Some(correction_engine::WeztermMonitor::with_shared_store(
-                    atspi_monitor.store_handle(),
-                    monitor_config,
-                )),
-                None => match correction_engine::WeztermMonitor::new(monitor_config) {
-                    Ok(m) => Some(m),
-                    Err(e) => {
-                        warn!("Failed to initialize wezterm correction backend: {}", e);
-                        None
-                    }
-                },
-            };
-            if monitor.is_some() {
-                info!(
-                    "wezterm correction backend enabled (live socket now: {})",
-                    correction_engine::WeztermMonitor::is_available()
-                );
-            }
-            monitor
-        } else {
-            None
-        };
-
-    #[cfg(feature = "correction")]
-    {
-        let store_handle = correction_monitor
-            .as_ref()
-            .map(|m| m.store_handle())
-            .or_else(|| wezterm_monitor.as_ref().map(|m| m.store_handle()));
-        if let Some(store) = store_handle {
-            let corrections_path = xdg_paths::ConfigDirs::from_env()
-                .map(|d| d.data_dir("voice-dictation").join("corrections.json"))
-                .unwrap_or_default();
-            tokio::spawn(async move {
-                if let Err(e) = watch_corrections_file(store, corrections_path).await {
-                    error!("Corrections file watcher error: {}", e);
-                }
-            });
-        }
-    }
+    let mut corrections =
+        platform::CorrectionLearning::start(&config.daemon.correction_settings()).await;
 
     let model_spec = ModelSpec::parse(&config.daemon.model)
         .map_err(|e| anyhow::anyhow!("Invalid model '{}': {}", config.daemon.model, e))?;
@@ -929,7 +765,7 @@ pub async fn run() -> Result<()> {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         loop {
             interval.tick().await;
-            if let Err(e) = notify(false, [(STATE_WATCHDOG, "1")].iter()) {
+            if let Err(e) = platform::notify_watchdog() {
                 debug!("Failed to send watchdog keepalive: {}", e);
             }
         }
@@ -969,26 +805,18 @@ pub async fn run() -> Result<()> {
     device_manager.spawn_device_watcher();
     info!("Audio streams pre-loaded and ready (fast startup enabled)");
 
-    let keyboard = Arc::new(KeyboardInjector::new());
-
     info!("Spawning integrated GUI...");
-    let gui_control_tx_gui = gui_control_tx.clone();
-    let spectrum_tx_gui = spectrum_tx.clone();
-    let runtime_handle = tokio::runtime::Handle::current();
+    let overlay =
+        platform::spawn_overlay(gui_control_tx.clone(), spectrum_tx.clone(), gui_status_tx);
 
-    let _gui_handle = tokio::task::spawn_blocking(move || {
-        slint_gui::run_integrated(
-            gui_control_tx_gui,
-            spectrum_tx_gui,
-            gui_status_tx,
-            runtime_handle,
-        )
-    });
-
-    info!("Waiting for GUI to initialize...");
     let gui_init_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut gui_available = false;
-    let mut channel_open = true;
+    let mut channel_open = overlay.is_some();
+    if channel_open {
+        info!("Waiting for GUI to initialize...");
+    } else {
+        debug!("No overlay on this platform");
+    }
     while channel_open {
         match tokio::time::timeout_at(gui_init_deadline, gui_status_rx.recv()).await {
             Ok(Some(GuiStatus::Ready)) => {
@@ -1019,7 +847,7 @@ pub async fn run() -> Result<()> {
 
     health_state.gui_healthy.store(gui_available, Ordering::Relaxed);
 
-    if !gui_available {
+    if overlay.is_some() && !gui_available {
         info!("Running without visual overlay until the GUI reports ready");
     }
 
@@ -1062,24 +890,27 @@ pub async fn run() -> Result<()> {
     health_state.engine_healthy.store(true, Ordering::Relaxed);
 
     let (state_tx, state_rx) = tokio::sync::watch::channel(DaemonState::Idle);
+    let (command_tx, mut command_rx) = mpsc::channel::<DaemonCommand>(10);
 
-    let (dbus_conn, command_sender, mut command_rx) =
-        dbus_control::create_dbus_service(state_rx, Arc::clone(&health_state)).await?;
-    let _dbus_conn = dbus_conn;
+    let _control_server = platform::serve_control(ControlContext {
+        commands: command_tx.clone(),
+        state: state_rx,
+        health: Arc::clone(&health_state),
+        missing_permissions: platform::missing_permissions,
+    })
+    .await?;
 
-    #[cfg(feature = "tray")]
-    let _tray_handle = {
-        let tray_tx = command_sender.lock().await.clone();
-        let tray_rx = state_tx.subscribe();
-        tray::spawn_tray(tray_rx, tray_tx, backend_type, audio_device_name.clone())
-    };
-
-    let _command_sender = command_sender;
+    let _tray_handle = platform::spawn_tray(
+        state_tx.subscribe(),
+        command_tx.clone(),
+        backend_type,
+        audio_device_name.clone(),
+    );
 
     info!("Daemon initialized - entering idle state (GUI hidden)");
 
-    if let Err(e) = notify(false, [(STATE_READY, "1")].iter()) {
-        warn!("Failed to notify systemd (Ready): {}", e);
+    if let Err(e) = platform::notify_ready() {
+        warn!("Failed to notify service manager (Ready): {}", e);
     }
 
     let mut daemon_state = DaemonState::Idle;
@@ -1087,11 +918,9 @@ pub async fn run() -> Result<()> {
     let mut audio_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut preview_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut media_was_playing = false;
-    let mut _idle_inhibit: Option<idle_inhibit::IdleInhibitor> = None;
-    let mut window_target: Option<window_target::WindowTarget> = None;
+    let mut _idle_inhibit: Option<platform::IdleInhibitor> = None;
+    let mut focus_target: Option<platform::FocusTarget> = None;
     let mut restart_requested = false;
-    #[cfg(feature = "correction")]
-    let mut last_injection: Option<correction_engine::InjectionContext> = None;
     let (cancel_tx, _cancel_rx) = tokio::sync::watch::channel(false);
 
     let _audio_health_timeout = Duration::from_secs(3);
@@ -1117,21 +946,23 @@ pub async fn run() -> Result<()> {
                     Ok(Some(cmd)) => match cmd {
                         DaemonCommand::StartRecording => {
                             info!("Received StartRecording command");
-                            window_target = window_target::WindowTarget::capture().await;
-                            if let Some(ref wt) = window_target {
-                                info!("Captured window target: class={}", wt.class());
+                            focus_target = platform::FocusTarget::capture().await;
+                            if let Some(ref target) = focus_target {
+                                info!("Captured focus target: class={}", target.class());
                             }
-                            media_was_playing = pause_media_if_playing();
+                            media_was_playing = platform::pause_media_if_playing();
 
-                            _idle_inhibit =
-                                match idle_inhibit::acquire("Active voice dictation session").await
-                                {
-                                    Ok(i) => Some(i),
-                                    Err(e) => {
-                                        warn!("Failed to acquire idle inhibit: {}", e);
-                                        None
-                                    }
-                                };
+                            _idle_inhibit = match platform::inhibit_idle(
+                                "Active voice dictation session",
+                            )
+                            .await
+                            {
+                                Ok(i) => Some(i),
+                                Err(e) => {
+                                    warn!("Failed to acquire idle inhibit: {}", e);
+                                    None
+                                }
+                            };
 
                             {
                                 let mut rx = audio_rx_shared.lock().await;
@@ -1350,40 +1181,13 @@ pub async fn run() -> Result<()> {
                             let _ = gui_control_tx.send(GuiControl::Exit);
                             break;
                         }
-                        #[cfg(feature = "correction")]
-                        DaemonCommand::SnapshotCorrection => match last_injection.clone() {
-                            Some(ctx) => {
-                                let context = correction_engine::InjectionContext {
-                                    timestamp: chrono::Utc::now(),
-                                    instant: Instant::now(),
-                                    ..ctx
-                                };
-                                let is_wezterm =
-                                    context.window_class == correction_engine::WEZTERM_WINDOW_CLASS;
-                                match (is_wezterm, &wezterm_monitor, &correction_monitor) {
-                                    (true, Some(monitor), _) => {
-                                        let _handle = monitor.start_monitoring(context);
-                                        info!("Manual snapshot: re-armed wezterm correction monitoring for last injection");
-                                    }
-                                    (_, _, Some(monitor)) => {
-                                        let _handle = monitor.start_monitoring(context);
-                                        info!("Manual snapshot: re-armed correction monitoring for last injection");
-                                    }
-                                    _ => {
-                                        warn!("SnapshotCorrection requested but correction learning is disabled");
-                                    }
-                                }
-                            }
-                            None => {
-                                warn!("SnapshotCorrection requested but nothing has been dictated yet");
-                            }
-                        },
+                        DaemonCommand::SnapshotCorrection => corrections.snapshot(),
                         _ => {
                             warn!("Ignoring unexpected command in Idle state");
                         }
                     },
                     Ok(None) => {
-                        error!("D-Bus command channel closed");
+                        error!("Control command channel closed");
                         break;
                     }
                     Err(_) => {}
@@ -1490,7 +1294,7 @@ pub async fn run() -> Result<()> {
                         }
                     },
                     Ok(None) => {
-                        error!("D-Bus command channel closed");
+                        error!("Control command channel closed");
                         break;
                     }
                     Err(_) => {}
@@ -1505,7 +1309,7 @@ pub async fn run() -> Result<()> {
                     let delay = config.daemon.media_resume_delay_ms;
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(delay)).await;
-                        resume_media();
+                        platform::resume_media();
                     });
                 }
 
@@ -1579,8 +1383,8 @@ pub async fn run() -> Result<()> {
                         }
                     }
 
-                    let profile = match &window_target {
-                        Some(wt) => app_profile::AppProfile::from_window_class(wt.class()),
+                    let profile = match &focus_target {
+                        Some(target) => app_profile::AppProfile::from_window_class(target.class()),
                         None => app_profile::AppProfile::for_category(
                             window_detect::AppCategory::General,
                         ),
@@ -1590,29 +1394,34 @@ pub async fn run() -> Result<()> {
                         SanitizationProcessor::new(profile.sanitization.clone(), profile.category);
                     let sanitized_result = sanitizer.process(&processed_result)?;
 
-                    match tokio::process::Command::new("wl-copy")
-                        .arg(&sanitized_result)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()
-                    {
-                        Ok(_) => {
-                            debug!("Copied to clipboard ({} chars)", sanitized_result.len());
-                        }
-                        Err(e) => {
-                            warn!("Failed to run wl-copy: {}", e);
-                        }
+                    let copied =
+                        platform::copy_to_clipboard(&sanitized_result).unwrap_or_else(|e| {
+                            warn!("{:#}", e);
+                            false
+                        });
+                    if copied {
+                        debug!("Copied to clipboard ({} chars)", sanitized_result.len());
                     }
 
-                    if let Some(ref wt) = window_target {
-                        wt.refocus().await.ok();
+                    if let Some(ref target) = focus_target {
+                        target.refocus().await.ok();
                     }
 
                     let expected_typing_secs =
                         (sanitized_result.len() as u64 * profile.word_delay_ms) / 1000;
                     if expected_typing_secs > 15 {
-                        warn!("Typing will take ~{}s ({} chars at {}ms/char) — text is already in clipboard if interrupted", expected_typing_secs, sanitized_result.len(), profile.word_delay_ms);
+                        let fallback = if copied {
+                            "; text is already in clipboard if interrupted"
+                        } else {
+                            ""
+                        };
+                        warn!(
+                            "Typing will take ~{}s ({} chars at {}ms/char){}",
+                            expected_typing_secs,
+                            sanitized_result.len(),
+                            profile.word_delay_ms,
+                            fallback
+                        );
                     }
                     info!(
                         "Typing final text ({:?} mode, delay={}ms)...",
@@ -1620,54 +1429,24 @@ pub async fn run() -> Result<()> {
                     );
                     let typing_tx = gui_control_tx.clone();
                     let mut last_sent = 0usize;
-                    keyboard
-                        .type_text_with_progress(
-                            &sanitized_result,
-                            profile.word_delay_ms,
-                            move |done, total| {
-                                let step = (total / 50).max(1);
-                                if done == 0 || done == total || done - last_sent >= step {
-                                    last_sent = done;
-                                    let _ = typing_tx.send(GuiControl::SetTyping { done, total });
-                                }
-                            },
-                        )
-                        .await?;
+                    platform::type_text_with_progress(
+                        &sanitized_result,
+                        profile.word_delay_ms,
+                        move |done, total| {
+                            let step = (total / 50).max(1);
+                            if done == 0 || done == total || done - last_sent >= step {
+                                last_sent = done;
+                                let _ = typing_tx.send(GuiControl::SetTyping { done, total });
+                            }
+                        },
+                    )
+                    .await?;
                     info!("Typed!");
 
-                    #[cfg(feature = "correction")]
-                    {
-                        let context = correction_engine::InjectionContext {
-                            text: sanitized_result.clone(),
-                            timestamp: chrono::Utc::now(),
-                            instant: std::time::Instant::now(),
-                            window_class: window_target
-                                .as_ref()
-                                .map(|w| w.class().to_string())
-                                .unwrap_or_default(),
-                            window_title: String::new(),
-                        };
-                        last_injection = Some(context.clone());
-                        let is_wezterm =
-                            context.window_class == correction_engine::WEZTERM_WINDOW_CLASS;
-                        match (is_wezterm, &wezterm_monitor, &correction_monitor) {
-                            (true, Some(monitor), _) => {
-                                let _handle = monitor.start_monitoring(context);
-                                debug!(
-                                    "wezterm correction monitoring started for {}s",
-                                    config.daemon.correction_monitor_duration_secs
-                                );
-                            }
-                            (_, _, Some(monitor)) => {
-                                let _handle = monitor.start_monitoring(context);
-                                debug!(
-                                    "Correction monitoring started for {}s",
-                                    config.daemon.correction_monitor_duration_secs
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
+                    corrections.record_injection(
+                        &sanitized_result,
+                        focus_target.as_ref().map(|t| t.class()).unwrap_or_default(),
+                    );
 
                     gui_control_tx
                         .send(GuiControl::SetClosing)
@@ -1701,7 +1480,7 @@ pub async fn run() -> Result<()> {
 
     info!("Daemon shutting down");
     if restart_requested {
-        info!("Exiting with code 64 to trigger systemd restart");
+        info!("Exiting with code 64 so the service manager restarts the daemon");
         std::process::exit(64);
     }
     Ok(())

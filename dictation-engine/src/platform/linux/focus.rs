@@ -2,12 +2,12 @@ use anyhow::Result;
 use std::time::Duration;
 use tracing::debug;
 
-pub struct WindowTarget {
+pub struct FocusTarget {
     address: String,
     class: String,
 }
 
-impl WindowTarget {
+impl FocusTarget {
     pub async fn capture() -> Option<Self> {
         let output = tokio::process::Command::new("hyprctl")
             .args(["activewindow", "-j"])

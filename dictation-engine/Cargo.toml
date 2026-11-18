@@ -57,6 +57,7 @@ libc = "0.2"
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false }
 tempfile = "3"
+zbus = { version = "5", features = ["p2p", "tokio"] }
 
 [lib]
 name = "dictation_engine"

@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 use crate::audio_backend::BackendType;
-use crate::dbus_control::{DaemonCommand, DaemonState};
+use crate::control::{DaemonCommand, DaemonState};
 
 pub struct DictationTray {
     state: DaemonState,
@@ -197,8 +197,8 @@ pub fn spawn_tray(
     command_tx: mpsc::Sender<DaemonCommand>,
     backend_type: BackendType,
     initial_device: Option<String>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> Option<tokio::task::JoinHandle<()>> {
+    Some(tokio::spawn(async move {
         let mut backoff = std::time::Duration::from_secs(5);
         let max_backoff = std::time::Duration::from_secs(30);
 
@@ -237,7 +237,7 @@ pub fn spawn_tray(
                 }
             }
         }
-    })
+    }))
 }
 
 async fn run_tray_update_loop(

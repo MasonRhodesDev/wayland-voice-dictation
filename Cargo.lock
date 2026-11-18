@@ -9277,11 +9277,8 @@ dependencies = [
  "reqwest",
  "schema-tui",
  "serde_json",
- "slint-gui",
- "systemd",
  "test-loop-ui",
  "tokio",
- "zbus",
 ]
 
 [[package]]
