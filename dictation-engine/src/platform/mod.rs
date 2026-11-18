@@ -18,8 +18,10 @@ mod utf16;
 
 #[cfg(any(not(target_os = "linux"), not(feature = "correction")))]
 mod no_correction;
-#[cfg(any(not(target_os = "linux"), not(feature = "tray")))]
+#[cfg(not(feature = "tray"))]
 mod no_tray;
+#[cfg(feature = "tray")]
+mod tray_menu;
 
 pub use imp::{
     audio_hotplug_dir, check_runtime_dependencies, copy_to_clipboard, daemon_exe, daemon_running,

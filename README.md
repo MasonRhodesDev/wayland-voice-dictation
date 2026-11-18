@@ -126,8 +126,8 @@ that binary under System Settings > Privacy & Security: **Microphone** and
 need the permissions granted again.
 
 For push to talk, bind a hotkey tool to run `voice-dictation start` on key press and
-`voice-dictation confirm` on release, or `voice-dictation toggle` on a single key. The
-overlay, tray, media pause and correction learning are Linux only.
+`voice-dictation confirm` on release, or `voice-dictation toggle` on a single key. Media
+pause and correction learning are Linux only.
 
 ## Download the Model
 

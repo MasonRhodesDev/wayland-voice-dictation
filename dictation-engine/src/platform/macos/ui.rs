@@ -11,6 +11,11 @@ const MAIN_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 static UI_LOOP: AtomicBool = AtomicBool::new(false);
 
+#[cfg(feature = "tray")]
+pub(super) fn ui_loop_running() -> bool {
+    UI_LOOP.load(Ordering::Acquire)
+}
+
 struct QuitUiOnDrop;
 
 impl Drop for QuitUiOnDrop {

@@ -2,6 +2,8 @@ mod control;
 mod focus;
 mod keyboard;
 mod permissions;
+#[cfg(feature = "tray")]
+mod tray;
 mod ui;
 
 use anyhow::{Context, Result};
@@ -10,11 +12,14 @@ use std::path::Path;
 use crate::platform::ImeProbeOptions;
 
 pub use super::no_correction::CorrectionLearning;
+#[cfg(not(feature = "tray"))]
 pub use super::no_tray::spawn_tray;
 pub use control::{daemon_exe, daemon_running, send_request, serve_control, ControlServer};
 pub use focus::FocusTarget;
 pub use keyboard::type_text_with_progress;
 pub use permissions::{missing_permissions, request_permissions};
+#[cfg(feature = "tray")]
+pub use tray::spawn_tray;
 pub use ui::{run_daemon, spawn_overlay};
 
 pub const SERVICE_STATUS_HINT: &str =
