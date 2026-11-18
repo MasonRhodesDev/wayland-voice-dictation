@@ -40,7 +40,7 @@ flowchart TD
 - Wayland compositor (Hyprland, Sway, etc.)
 - `wtype` — keyboard input injection
 - PipeWire or ALSA audio
-- ~1.6 GB disk space for the Parakeet model
+- ~2.5 GB disk space for the Parakeet model
 
 Optional: `playerctl` for media pause/resume.
 
@@ -131,7 +131,7 @@ overlay, tray, media pause and correction learning are Linux only.
 
 ## Download the Model
 
-The Parakeet model (~1.6 GB) is not included and must be downloaded separately:
+The Parakeet model (~2.5 GB) is not included and must be downloaded separately:
 
 ```bash
 voice-dictation download-model

@@ -19,13 +19,14 @@ for file in "${FILES[@]}"; do
     dest="$MODEL_DIR/$file"
     if [[ -f "$dest" && -s "$dest" ]]; then
         size=$(du -h "$dest" | cut -f1)
-        echo "  $file — already exists ($size), skipping"
+        echo "  $file already exists ($size), skipping"
         continue
     fi
     echo "  Downloading $file..."
-    curl --progress-bar --location --output "$dest" "$BASE_URL/$file"
+    curl --fail --progress-bar --location --output "$dest.part" "$BASE_URL/$file"
+    mv "$dest.part" "$dest"
 done
 
 echo
 echo "Model download complete."
-echo "You can now start the daemon: systemctl --user start voice-dictation"
+echo "You can now start the daemon."

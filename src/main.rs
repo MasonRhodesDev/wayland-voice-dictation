@@ -1008,7 +1008,7 @@ fn download_model() -> Result<(), Box<dyn std::error::Error>> {
             let size = fs::metadata(&dest)?.len();
             if size > 0 {
                 println!(
-                    "  {} — already exists ({:.1} MB), skipping",
+                    "  {} already exists ({:.1} MB), skipping",
                     filename,
                     size as f64 / 1_048_576.0
                 );
@@ -1020,7 +1020,7 @@ fn download_model() -> Result<(), Box<dyn std::error::Error>> {
         print!("  Downloading {}... ", filename);
         io::stdout().flush()?;
 
-        let response = client.get(&url).send()?;
+        let mut response = client.get(&url).send()?;
         if !response.status().is_success() {
             eprintln!("HTTP {}", response.status());
             return Err(
@@ -1028,17 +1028,10 @@ fn download_model() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        let total = response.content_length();
-        let bytes = response.bytes()?;
-        let size = bytes.len();
-
-        fs::write(&dest, &bytes)?;
-
-        if let Some(t) = total {
-            println!("{:.1} MB", t as f64 / 1_048_576.0);
-        } else {
-            println!("{:.1} MB", size as f64 / 1_048_576.0);
-        }
+        let partial = model_dir.join(format!("{}.part", filename));
+        let size = io::copy(&mut response, &mut fs::File::create(&partial)?)?;
+        fs::rename(&partial, &dest)?;
+        println!("{:.1} MB", size as f64 / 1_048_576.0);
     }
 
     println!();
