@@ -1,7 +1,11 @@
 mod control;
+#[cfg(feature = "correction")]
+pub(super) mod correction;
 mod focus;
 mod keyboard;
+mod media;
 mod permissions;
+mod wezterm;
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -10,12 +14,13 @@ use tokio::sync::{broadcast, mpsc};
 use crate::platform::ImeProbeOptions;
 use crate::{GuiControl, GuiStatus};
 
-pub use super::no_correction::CorrectionLearning;
 pub use super::no_tray::spawn_tray;
 pub use control::{daemon_exe, daemon_running, send_request, serve_control, ControlServer};
 pub use focus::FocusTarget;
 pub use keyboard::type_text_with_progress;
+pub use media::{pause_media_if_playing, resume_media, PausedMedia};
 pub use permissions::{missing_permissions, request_permissions};
+pub use wezterm::wezterm_install;
 
 pub const SERVICE_STATUS_HINT: &str =
     "launchctl print gui/$(id -u)/com.voicedictation.daemon (log: ~/Library/Logs/voice-dictation.log)";
@@ -35,12 +40,6 @@ pub async fn inhibit_idle(_reason: &str) -> Result<IdleInhibitor> {
         .context("Failed to run caffeinate")?;
     Ok(IdleInhibitor { _caffeinate: caffeinate })
 }
-
-pub fn pause_media_if_playing() -> bool {
-    false
-}
-
-pub fn resume_media() {}
 
 pub fn notify_ready() -> Result<()> {
     Ok(())

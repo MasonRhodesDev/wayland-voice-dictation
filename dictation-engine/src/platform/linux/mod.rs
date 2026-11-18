@@ -1,6 +1,6 @@
 mod control;
 #[cfg(feature = "correction")]
-mod correction;
+pub(super) mod correction;
 mod focus;
 mod idle;
 mod ime_probe;
@@ -9,22 +9,18 @@ mod keyboard;
 mod tray;
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use systemd::daemon::{notify, STATE_READY, STATE_WATCHDOG};
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 
-use crate::platform::Permission;
+use crate::platform::{Permission, WeztermInstall};
 use crate::{GuiControl, GuiStatus};
 
-#[cfg(not(feature = "correction"))]
-pub use super::no_correction::CorrectionLearning;
 #[cfg(not(feature = "tray"))]
 pub use super::no_tray::spawn_tray;
 pub use control::{daemon_exe, daemon_running, send_request, serve_control, ControlServer};
-#[cfg(feature = "correction")]
-pub use correction::CorrectionLearning;
 pub use focus::FocusTarget;
 pub use idle::{inhibit_idle, IdleInhibitor};
 pub use ime_probe::run as run_ime_probe;
@@ -36,19 +32,19 @@ pub const SERVICE_STATUS_HINT: &str = "systemctl --user status voice-dictation";
 pub const SERVICE_START_HINT: &str = "systemctl --user start voice-dictation";
 pub const SERVICE_RESTART_HINT: &str = "systemctl --user restart voice-dictation";
 
-pub fn pause_media_if_playing() -> bool {
-    let Ok(output) = Command::new("playerctl").arg("status").output() else {
-        return false;
-    };
-    let playing = String::from_utf8_lossy(&output.stdout).contains("Playing");
-    if playing {
-        let _ = Command::new("playerctl").arg("pause").output();
-        info!("Paused media playback");
+pub struct PausedMedia;
+
+pub fn pause_media_if_playing() -> Option<PausedMedia> {
+    let output = Command::new("playerctl").arg("status").output().ok()?;
+    if !String::from_utf8_lossy(&output.stdout).contains("Playing") {
+        return None;
     }
-    playing
+    let _ = Command::new("playerctl").arg("pause").output();
+    info!("Paused media playback");
+    Some(PausedMedia)
 }
 
-pub fn resume_media() {
+pub fn resume_media(_paused: PausedMedia) {
     let _ = Command::new("playerctl").arg("play").output();
     info!("Resumed media playback");
 }
@@ -88,6 +84,13 @@ pub fn copy_to_clipboard(text: &str) -> Result<bool> {
 
 pub fn audio_hotplug_dir() -> Option<&'static Path> {
     Some(Path::new("/dev/snd"))
+}
+
+pub fn wezterm_install() -> Option<WeztermInstall> {
+    Some(WeztermInstall {
+        program: PathBuf::from("wezterm"),
+        socket_dir: xdg_paths::BaseDirs::from_env().ok()?.runtime_path("wezterm"),
+    })
 }
 
 pub fn missing_permissions() -> Vec<Permission> {

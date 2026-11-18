@@ -25,13 +25,6 @@ pub struct CorrectionMonitor {
 }
 
 impl CorrectionMonitor {
-    pub async fn new(config: MonitorConfig) -> Result<Self> {
-        let connection = AtspiConnection::connect().await;
-        let store = CorrectionStore::load(&config)?;
-
-        Ok(Self { source: Arc::new(connection), store: Arc::new(Mutex::new(store)), config })
-    }
-
     pub fn with_source(
         source: Arc<dyn TextChangeSource>,
         store: CorrectionStore,
@@ -70,7 +63,7 @@ impl CorrectionMonitor {
             return Ok(Vec::new());
         }
 
-        let mut rx = source.subscribe().await?;
+        let mut rx = source.subscribe(&context).await?;
         let monitor_duration = Duration::from_secs(config.monitor_duration_secs);
 
         info!(

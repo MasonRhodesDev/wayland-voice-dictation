@@ -2342,6 +2342,7 @@ name = "dictation-engine"
 version = "0.7.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
@@ -2365,6 +2366,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-av-foundation",
+ "objc2-foundation 0.3.2",
  "ort",
  "parakeet-rs",
  "pipewire",

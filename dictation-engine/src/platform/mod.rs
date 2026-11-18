@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -10,24 +11,34 @@ mod macos;
 use macos as imp;
 
 #[cfg(any(target_os = "macos", test))]
+mod applescript;
+#[cfg(any(target_os = "macos", test))]
 mod lsappinfo;
 #[cfg(any(target_os = "macos", test))]
 mod unix_socket;
 #[cfg(any(target_os = "macos", test))]
 mod utf16;
 
-#[cfg(any(not(target_os = "linux"), not(feature = "correction")))]
+#[cfg(feature = "correction")]
+mod correction;
+#[cfg(not(feature = "correction"))]
 mod no_correction;
 #[cfg(any(not(target_os = "linux"), not(feature = "tray")))]
 mod no_tray;
+#[cfg(all(feature = "correction", any(target_os = "macos", test)))]
+mod text_edits;
 
+#[cfg(feature = "correction")]
+pub use correction::CorrectionLearning;
 pub use imp::{
     audio_hotplug_dir, check_runtime_dependencies, copy_to_clipboard, daemon_exe, daemon_running,
     inhibit_idle, missing_permissions, notify_ready, notify_watchdog, pause_media_if_playing,
     request_permissions, resume_media, run_ime_probe, send_request, serve_control, spawn_overlay,
-    spawn_tray, type_text_with_progress, ControlServer, CorrectionLearning, FocusTarget,
-    IdleInhibitor, SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
+    spawn_tray, type_text_with_progress, wezterm_install, ControlServer, FocusTarget,
+    IdleInhibitor, PausedMedia, SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
 };
+#[cfg(not(feature = "correction"))]
+pub use no_correction::CorrectionLearning;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Permission {
@@ -39,6 +50,12 @@ impl fmt::Display for Permission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} permission is missing: {}", self.name, self.remedy)
     }
+}
+
+#[derive(Debug)]
+pub struct WeztermInstall {
+    pub program: PathBuf,
+    pub socket_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]

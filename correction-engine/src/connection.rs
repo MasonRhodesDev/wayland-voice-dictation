@@ -1,4 +1,4 @@
-use crate::types::{TextChangeEvent, TextChangeOp};
+use crate::types::{InjectionContext, TextChangeEvent, TextChangeOp};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -7,7 +7,10 @@ use tracing::{debug, error, info, warn};
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TextChangeSource: Send + Sync {
-    async fn subscribe(&self) -> Result<mpsc::Receiver<TextChangeEvent>>;
+    async fn subscribe(
+        &self,
+        context: &InjectionContext,
+    ) -> Result<mpsc::Receiver<TextChangeEvent>>;
 
     fn is_available(&self) -> bool;
 }
@@ -41,7 +44,10 @@ impl AtspiConnection {
 
 #[async_trait]
 impl TextChangeSource for AtspiConnection {
-    async fn subscribe(&self) -> Result<mpsc::Receiver<TextChangeEvent>> {
+    async fn subscribe(
+        &self,
+        _context: &InjectionContext,
+    ) -> Result<mpsc::Receiver<TextChangeEvent>> {
         let (tx, rx) = mpsc::channel(256);
 
         if !self.available {
@@ -132,7 +138,10 @@ impl MockTextChangeSource {
 
 #[async_trait]
 impl TextChangeSource for MockTextChangeSource {
-    async fn subscribe(&self) -> Result<mpsc::Receiver<TextChangeEvent>> {
+    async fn subscribe(
+        &self,
+        _context: &InjectionContext,
+    ) -> Result<mpsc::Receiver<TextChangeEvent>> {
         let mut rx_guard = self.rx.lock().await;
         rx_guard.take().ok_or_else(|| anyhow::anyhow!("MockTextChangeSource already subscribed"))
     }

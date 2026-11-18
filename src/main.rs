@@ -592,19 +592,23 @@ fn debug_play(filename: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn debug_wezterm_probe() -> Result<(), Box<dyn std::error::Error>> {
-    use correction_engine::wezterm::{discover_socket, WeztermCli, WeztermClient};
+    use correction_engine::wezterm::{WeztermCli, WeztermClient};
 
-    let Some(socket) = discover_socket() else {
+    let Some(install) = platform::wezterm_install() else {
+        println!("WezTerm: NOT FOUND (cannot locate the wezterm CLI or its socket directory)");
+        return Ok(());
+    };
+    println!("CLI:    {}", install.program.display());
+    let Some(cli) = WeztermCli::discover(&install.program, &install.socket_dir) else {
         println!("Socket: NOT FOUND");
         println!(
-            "No live wezterm socket under $XDG_RUNTIME_DIR/wezterm/ (and $WEZTERM_UNIX_SOCKET \
-             is unset or stale). Is a wezterm GUI instance running?"
+            "No live wezterm socket under {} (and $WEZTERM_UNIX_SOCKET is unset or stale). \
+             Is a wezterm GUI instance running?",
+            install.socket_dir.display()
         );
         return Ok(());
     };
-    println!("Socket: {}", socket.display());
-
-    let cli = WeztermCli::with_socket(socket);
+    println!("Socket: {}", cli.socket().display());
     tokio::runtime::Runtime::new()?.block_on(async move {
         let panes = cli.list_panes().await?;
         println!("Panes:  {}", panes.len());
@@ -1137,9 +1141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Correction monitoring re-armed for the last dictation");
         }
         Commands::CorrectionStats => {
-            let home = std::env::var("HOME")?;
-            let corrections_path = std::path::PathBuf::from(&home)
-                .join(".local/share/voice-dictation/corrections.json");
+            let corrections_path = correction_engine::MonitorConfig::default().store_path;
             if corrections_path.exists() {
                 let content = fs::read_to_string(&corrections_path)?;
                 let data: Value = serde_json::from_str(&content)?;
