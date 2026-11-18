@@ -1,6 +1,6 @@
-use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use correction_engine::diff::DictatedSpan;
 use correction_engine::types::TextChangeOp;
 use correction_engine::TextChangeEvent;
 
@@ -8,7 +8,7 @@ const SETTLE: Duration = Duration::from_secs(1);
 const MAX_FIELD_LEN: usize = 256 * 1024;
 
 pub(crate) struct EditTracker {
-    injection: Option<Range<usize>>,
+    injection: DictatedSpan,
     committed: String,
     pending: Option<(String, Instant)>,
     source_app: String,
@@ -27,7 +27,7 @@ impl EditTracker {
         }
         let start = text[..text.rfind(injected)?].chars().count();
         Some(Self {
-            injection: Some(start..start + injected.chars().count()),
+            injection: DictatedSpan::new(start..start + injected.chars().count()),
             committed: text.to_string(),
             pending: None,
             source_app,
@@ -35,7 +35,7 @@ impl EditTracker {
     }
 
     pub(crate) fn is_tracking(&self) -> bool {
-        self.injection.is_some()
+        self.injection.is_tracking()
     }
 
     pub(crate) fn observe(&mut self, text: &str, now: Instant) -> Vec<TextChangeEvent> {
@@ -58,48 +58,21 @@ impl EditTracker {
         let edit = word_diff(&self.committed, text);
         self.committed = text.to_string();
         self.pending = None;
-        match (edit, self.injection.take()) {
-            (Some(edit), Some(injection)) => self.apply(edit, injection, now),
-            (None, injection) => {
-                self.injection = injection;
-                Vec::new()
-            }
-            (Some(_), None) => Vec::new(),
-        }
+        edit.map_or_else(Vec::new, |edit| self.apply(edit, now))
     }
 
-    fn apply(
-        &mut self,
-        edit: WordEdit,
-        injection: Range<usize>,
-        now: Instant,
-    ) -> Vec<TextChangeEvent> {
-        let deleted_len = edit.deleted.chars().count();
-        let inserted_len = edit.inserted.chars().count();
-        let end = edit.start + deleted_len;
-
-        if end <= injection.start {
-            self.injection = Some(
-                injection.start - deleted_len + inserted_len
-                    ..injection.end - deleted_len + inserted_len,
-            );
+    fn apply(&mut self, edit: WordEdit, now: Instant) -> Vec<TextChangeEvent> {
+        let Some(offset) = self.injection.edit(
+            edit.start,
+            edit.deleted.chars().count(),
+            edit.inserted.chars().count(),
+        ) else {
             return Vec::new();
-        }
-        if edit.start >= injection.end {
-            self.injection = Some(injection);
-            return Vec::new();
-        }
-        let inside = edit.start >= injection.start && end <= injection.end;
-        let whole = edit.start == injection.start && end == injection.end;
-        if !inside || whole {
-            return Vec::new();
-        }
-
-        self.injection = Some(injection.start..injection.end - deleted_len + inserted_len);
+        };
         if edit.deleted.split_whitespace().eq(edit.inserted.split_whitespace()) {
             return Vec::new();
         }
-        let start_pos = (edit.start - injection.start) as i32;
+        let start_pos = offset as i32;
         [(TextChangeOp::Delete, edit.deleted), (TextChangeOp::Insert, edit.inserted)]
             .into_iter()
             .filter(|(_, text)| !text.is_empty())

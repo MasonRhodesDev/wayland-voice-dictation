@@ -2,9 +2,44 @@ use crate::types::{
     CorrectionPair, InjectionContext, ReplacementEvent, TextChangeEvent, TextChangeOp,
 };
 use chrono::Utc;
+use std::ops::Range;
 use std::time::Duration;
 
 const REPLACEMENT_GAP: Duration = Duration::from_secs(2);
+
+pub struct DictatedSpan(Option<Range<usize>>);
+
+impl DictatedSpan {
+    pub fn new(range: Range<usize>) -> Self {
+        Self(Some(range))
+    }
+
+    pub fn is_tracking(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub fn edit(&mut self, start: usize, deleted: usize, inserted: usize) -> Option<usize> {
+        let span = self.0.take()?;
+        let end = start + deleted;
+
+        if end <= span.start {
+            self.0 = Some(span.start - deleted + inserted..span.end - deleted + inserted);
+            return None;
+        }
+        if start >= span.end {
+            self.0 = Some(span);
+            return None;
+        }
+        let inside = start >= span.start && end <= span.end;
+        let whole = start == span.start && end == span.end;
+        if !inside || whole {
+            return None;
+        }
+
+        self.0 = Some(span.start..span.end - deleted + inserted);
+        Some(start - span.start)
+    }
+}
 
 pub fn group_replacement_events(events: &[TextChangeEvent]) -> Vec<ReplacementEvent> {
     let mut replacements = Vec::new();
