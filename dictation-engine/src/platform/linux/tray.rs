@@ -58,14 +58,7 @@ impl Tray for DictationTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        let cmd = match self.model.state {
-            DaemonState::Idle => DaemonCommand::StartRecording,
-            DaemonState::Recording => DaemonCommand::Confirm,
-            DaemonState::Processing => return,
-        };
-        if let Err(e) = self.command_tx.try_send(cmd) {
-            warn!("Tray activate: failed to send command: {e}");
-        }
+        self.model.activate(&self.command_tx);
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {

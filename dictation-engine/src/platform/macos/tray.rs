@@ -5,8 +5,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSControlStateValueOff, NSControlStateValueOn, NSImage, NSMenu, NSMenuItem, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength,
+    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventMask,
+    NSEventModifierFlags, NSEventType, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength,
 };
 use objc2_foundation::NSString;
 use tokio::sync::{mpsc, watch};
@@ -36,6 +37,11 @@ define_class!(
         #[unsafe(method(activated:))]
         fn activated(&self, sender: &NSMenuItem) {
             activate(sender.tag());
+        }
+
+        #[unsafe(method(clicked:))]
+        fn clicked(&self, _sender: Option<&AnyObject>) {
+            click(self.mtm());
         }
     }
 );
@@ -154,16 +160,17 @@ fn install(model: TrayModel, command_tx: mpsc::Sender<DaemonCommand>) {
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
-    status_item.setMenu(Some(&menu));
-    let mut tray = Tray {
-        status_item,
-        menu,
-        target: MenuTarget::new(mtm),
-        model,
-        shown: None,
-        actions: Vec::new(),
-        command_tx,
-    };
+    let target = MenuTarget::new(mtm);
+    if let Some(button) = status_item.button(mtm) {
+        let receiver: &AnyObject = &target;
+        unsafe {
+            button.setTarget(Some(receiver));
+            button.setAction(Some(sel!(clicked:)));
+        }
+        button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
+    }
+    let mut tray =
+        Tray { status_item, menu, target, model, shown: None, actions: Vec::new(), command_tx };
     tray.render(mtm);
     TRAY.with_borrow_mut(|slot| *slot = Some(tray));
     info!("Menu bar status item active");
@@ -185,6 +192,31 @@ fn update(state: Option<DaemonState>, devices: Option<Vec<DeviceInfo>>) {
         }
         tray.render(mtm);
     });
+}
+
+fn click(mtm: MainThreadMarker) {
+    let wants_menu = NSApplication::sharedApplication(mtm).currentEvent().is_some_and(|event| {
+        event.r#type() == NSEventType::RightMouseUp
+            || event.modifierFlags().contains(NSEventModifierFlags::Control)
+    });
+    if !wants_menu {
+        TRAY.with_borrow_mut(|tray| {
+            if let Some(tray) = tray {
+                tray.model.activate(&tray.command_tx);
+            }
+        });
+        return;
+    }
+    let Some((status_item, menu)) = TRAY.with_borrow(|tray| {
+        tray.as_ref().map(|tray| (tray.status_item.clone(), tray.menu.clone()))
+    }) else {
+        return;
+    };
+    status_item.setMenu(Some(&menu));
+    if let Some(button) = status_item.button(mtm) {
+        unsafe { button.performClick(None) };
+    }
+    status_item.setMenu(None);
 }
 
 fn activate(tag: isize) {
