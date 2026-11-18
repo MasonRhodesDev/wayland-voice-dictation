@@ -2342,6 +2342,7 @@ name = "dictation-engine"
 version = "0.7.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "block2 0.6.2",
  "chrono",

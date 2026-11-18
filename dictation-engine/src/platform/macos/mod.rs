@@ -1,4 +1,6 @@
 mod control;
+#[cfg(feature = "correction")]
+pub(super) mod correction;
 mod focus;
 mod keyboard;
 mod media;

@@ -127,7 +127,7 @@ need the permissions granted again.
 
 For push to talk, bind a hotkey tool to run `voice-dictation start` on key press and
 `voice-dictation confirm` on release, or `voice-dictation toggle` on a single key. The
-overlay, tray, media pause and correction learning are Linux only.
+overlay and tray are Linux only. Media pause covers Music and Spotify.
 
 ## Download the Model
 

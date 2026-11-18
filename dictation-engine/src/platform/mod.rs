@@ -18,14 +18,16 @@ mod unix_socket;
 #[cfg(any(target_os = "macos", test))]
 mod utf16;
 
-#[cfg(all(target_os = "linux", feature = "correction"))]
+#[cfg(feature = "correction")]
 mod correction;
-#[cfg(any(not(target_os = "linux"), not(feature = "correction")))]
+#[cfg(not(feature = "correction"))]
 mod no_correction;
 #[cfg(any(not(target_os = "linux"), not(feature = "tray")))]
 mod no_tray;
+#[cfg(all(feature = "correction", any(target_os = "macos", test)))]
+mod text_edits;
 
-#[cfg(all(target_os = "linux", feature = "correction"))]
+#[cfg(feature = "correction")]
 pub use correction::CorrectionLearning;
 pub use imp::{
     audio_hotplug_dir, check_runtime_dependencies, copy_to_clipboard, daemon_exe, daemon_running,
@@ -34,7 +36,7 @@ pub use imp::{
     spawn_tray, type_text_with_progress, ControlServer, FocusTarget, IdleInhibitor, PausedMedia,
     SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
 };
-#[cfg(any(not(target_os = "linux"), not(feature = "correction")))]
+#[cfg(not(feature = "correction"))]
 pub use no_correction::CorrectionLearning;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -35,6 +35,10 @@ pub(super) fn automation() -> Permission {
     missing("Automation")
 }
 
+pub(super) fn accessibility_granted() -> bool {
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
 fn microphone_status() -> Option<AVAuthorizationStatus> {
     let audio = unsafe { AVMediaTypeAudio }?;
     Some(unsafe { AVCaptureDevice::authorizationStatusForMediaType(audio) })
@@ -48,7 +52,7 @@ pub fn missing_permissions() -> Vec<Permission> {
     ) {
         missing_now.push(missing("Microphone"));
     }
-    if unsafe { AXIsProcessTrusted() } == 0 {
+    if !accessibility_granted() {
         missing_now.push(accessibility());
     }
     missing_now
