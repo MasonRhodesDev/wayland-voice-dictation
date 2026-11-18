@@ -592,19 +592,23 @@ fn debug_play(filename: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn debug_wezterm_probe() -> Result<(), Box<dyn std::error::Error>> {
-    use correction_engine::wezterm::{discover_socket, WeztermCli, WeztermClient};
+    use correction_engine::wezterm::{WeztermCli, WeztermClient};
 
-    let Some(socket) = discover_socket() else {
+    let Some(install) = platform::wezterm_install() else {
+        println!("WezTerm: NOT FOUND (cannot locate the wezterm CLI or its socket directory)");
+        return Ok(());
+    };
+    println!("CLI:    {}", install.program.display());
+    let Some(cli) = WeztermCli::discover(&install.program, &install.socket_dir) else {
         println!("Socket: NOT FOUND");
         println!(
-            "No live wezterm socket under $XDG_RUNTIME_DIR/wezterm/ (and $WEZTERM_UNIX_SOCKET \
-             is unset or stale). Is a wezterm GUI instance running?"
+            "No live wezterm socket under {} (and $WEZTERM_UNIX_SOCKET is unset or stale). \
+             Is a wezterm GUI instance running?",
+            install.socket_dir.display()
         );
         return Ok(());
     };
-    println!("Socket: {}", socket.display());
-
-    let cli = WeztermCli::with_socket(socket);
+    println!("Socket: {}", cli.socket().display());
     tokio::runtime::Runtime::new()?.block_on(async move {
         let panes = cli.list_panes().await?;
         println!("Panes:  {}", panes.len());

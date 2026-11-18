@@ -16,7 +16,7 @@ use super::permissions::accessibility_granted;
 use crate::platform::text_edits::EditTracker;
 use crate::platform::CorrectionSettings;
 
-pub(crate) const WEZTERM_APP_ID: &str = "com.github.wez.wezterm";
+pub(crate) use super::wezterm::WEZTERM_APP_ID;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const LOCATE_TIMEOUT: Duration = Duration::from_secs(3);

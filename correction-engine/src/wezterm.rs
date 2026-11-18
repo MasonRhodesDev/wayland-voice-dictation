@@ -31,7 +31,7 @@ fn contains_prompt_marker(s: &str) -> bool {
     s.chars().any(|c| PROMPT_MARKERS.contains(&c))
 }
 
-pub fn discover_socket() -> Option<PathBuf> {
+pub fn discover_socket(sock_dir: &Path) -> Option<PathBuf> {
     if let Ok(env_sock) = std::env::var("WEZTERM_UNIX_SOCKET") {
         let path = PathBuf::from(env_sock);
         if socket_is_live(&path) {
@@ -40,10 +40,8 @@ pub fn discover_socket() -> Option<PathBuf> {
         debug!("WEZTERM_UNIX_SOCKET set but socket is not live: {}", path.display());
     }
 
-    let sock_dir = xdg_paths::BaseDirs::from_env().ok()?.runtime_path("wezterm");
-
     let mut live: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(&sock_dir).ok()?.flatten() {
+    for entry in std::fs::read_dir(sock_dir).ok()?.flatten() {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -89,16 +87,13 @@ pub trait WeztermClient: Send + Sync {
 }
 
 pub struct WeztermCli {
+    program: PathBuf,
     socket: PathBuf,
 }
 
 impl WeztermCli {
-    pub fn discover() -> Option<Self> {
-        discover_socket().map(|socket| Self { socket })
-    }
-
-    pub fn with_socket(socket: PathBuf) -> Self {
-        Self { socket }
+    pub fn discover(program: &Path, sock_dir: &Path) -> Option<Self> {
+        discover_socket(sock_dir).map(|socket| Self { program: program.to_path_buf(), socket })
     }
 
     pub fn socket(&self) -> &Path {
@@ -106,7 +101,7 @@ impl WeztermCli {
     }
 
     async fn run(&self, args: &[&str]) -> Result<String> {
-        let mut cmd = tokio::process::Command::new("wezterm");
+        let mut cmd = tokio::process::Command::new(&self.program);
         cmd.arg("cli")
             .arg("--no-auto-start")
             .args(args)
@@ -381,26 +376,36 @@ pub fn diff_revision(
     RevisionOutcome::Corrections(pairs)
 }
 
+#[derive(Clone)]
+enum Connection {
+    Discover(fn() -> Option<WeztermCli>),
+    Client(Arc<dyn WeztermClient>),
+}
+
 pub struct WeztermMonitor {
-    client: Option<Arc<dyn WeztermClient>>,
+    connection: Connection,
     store: Arc<Mutex<CorrectionStore>>,
     config: MonitorConfig,
     poll_interval: Duration,
 }
 
 impl WeztermMonitor {
-    pub fn new(config: MonitorConfig) -> Result<Self> {
+    pub fn new(config: MonitorConfig, discover: fn() -> Option<WeztermCli>) -> Result<Self> {
         let store = CorrectionStore::load(&config)?;
-        Ok(Self {
-            client: None,
-            store: Arc::new(Mutex::new(store)),
-            config,
-            poll_interval: DEFAULT_POLL_INTERVAL,
-        })
+        Ok(Self::with_shared_store(Arc::new(Mutex::new(store)), config, discover))
     }
 
-    pub fn with_shared_store(store: Arc<Mutex<CorrectionStore>>, config: MonitorConfig) -> Self {
-        Self { client: None, store, config, poll_interval: DEFAULT_POLL_INTERVAL }
+    pub fn with_shared_store(
+        store: Arc<Mutex<CorrectionStore>>,
+        config: MonitorConfig,
+        discover: fn() -> Option<WeztermCli>,
+    ) -> Self {
+        Self {
+            connection: Connection::Discover(discover),
+            store,
+            config,
+            poll_interval: DEFAULT_POLL_INTERVAL,
+        }
     }
 
     pub fn with_client(
@@ -409,7 +414,7 @@ impl WeztermMonitor {
         config: MonitorConfig,
     ) -> Self {
         Self {
-            client: Some(client),
+            connection: Connection::Client(client),
             store: Arc::new(Mutex::new(store)),
             config,
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -424,21 +429,24 @@ impl WeztermMonitor {
         Arc::clone(&self.store)
     }
 
-    pub fn is_available() -> bool {
-        discover_socket().is_some()
+    pub fn is_available(&self) -> bool {
+        match &self.connection {
+            Connection::Discover(discover) => discover().is_some(),
+            Connection::Client(_) => true,
+        }
     }
 
     pub fn start_monitoring(
         &self,
         context: InjectionContext,
     ) -> tokio::task::JoinHandle<Vec<CorrectionPair>> {
-        let client = self.client.clone();
+        let connection = self.connection.clone();
         let store = Arc::clone(&self.store);
         let config = self.config.clone();
         let poll_interval = self.poll_interval;
 
         tokio::spawn(async move {
-            match Self::run_monitoring(client, store, config, poll_interval, context).await {
+            match Self::run_monitoring(connection, store, config, poll_interval, context).await {
                 Ok(pairs) => pairs,
                 Err(e) => {
                     error!("wezterm correction monitoring failed: {}", e);
@@ -449,7 +457,7 @@ impl WeztermMonitor {
     }
 
     async fn run_monitoring(
-        client: Option<Arc<dyn WeztermClient>>,
+        connection: Connection,
         store: Arc<Mutex<CorrectionStore>>,
         config: MonitorConfig,
         poll_interval: Duration,
@@ -460,12 +468,11 @@ impl WeztermMonitor {
             return Ok(Vec::new());
         }
 
-        let client: Arc<dyn WeztermClient> = match client {
-            Some(c) => c,
-            None => Arc::new(
-                WeztermCli::discover()
-                    .context("no live wezterm socket found — is wezterm running?")?,
-            ),
+        let client: Arc<dyn WeztermClient> = match connection {
+            Connection::Client(client) => client,
+            Connection::Discover(discover) => {
+                Arc::new(discover().context("no live wezterm socket found; is wezterm running?")?)
+            }
         };
 
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1003,8 +1010,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a live wezterm GUI instance; read-only probe"]
     async fn live_socket_list_and_get_text() {
-        let Some(cli) = WeztermCli::discover() else {
-            eprintln!("no live wezterm socket — skipping");
+        let sock_dir = xdg_paths::BaseDirs::from_env().map(|dirs| dirs.runtime_path("wezterm"));
+        let Some(cli) =
+            sock_dir.ok().and_then(|dir| WeztermCli::discover(Path::new("wezterm"), &dir))
+        else {
+            eprintln!("no live wezterm socket; skipping");
             return;
         };
         println!("socket: {}", cli.socket().display());

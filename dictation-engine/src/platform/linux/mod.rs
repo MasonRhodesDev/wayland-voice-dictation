@@ -9,13 +9,13 @@ mod keyboard;
 mod tray;
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use systemd::daemon::{notify, STATE_READY, STATE_WATCHDOG};
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 
-use crate::platform::Permission;
+use crate::platform::{Permission, WeztermInstall};
 use crate::{GuiControl, GuiStatus};
 
 #[cfg(not(feature = "tray"))]
@@ -84,6 +84,13 @@ pub fn copy_to_clipboard(text: &str) -> Result<bool> {
 
 pub fn audio_hotplug_dir() -> Option<&'static Path> {
     Some(Path::new("/dev/snd"))
+}
+
+pub fn wezterm_install() -> Option<WeztermInstall> {
+    Some(WeztermInstall {
+        program: PathBuf::from("wezterm"),
+        socket_dir: xdg_paths::BaseDirs::from_env().ok()?.runtime_path("wezterm"),
+    })
 }
 
 pub fn missing_permissions() -> Vec<Permission> {

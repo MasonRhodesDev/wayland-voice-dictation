@@ -5,6 +5,7 @@ mod focus;
 mod keyboard;
 mod media;
 mod permissions;
+mod wezterm;
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -19,6 +20,7 @@ pub use focus::FocusTarget;
 pub use keyboard::type_text_with_progress;
 pub use media::{pause_media_if_playing, resume_media, PausedMedia};
 pub use permissions::{missing_permissions, request_permissions};
+pub use wezterm::wezterm_install;
 
 pub const SERVICE_STATUS_HINT: &str =
     "launchctl print gui/$(id -u)/com.voicedictation.daemon (log: ~/Library/Logs/voice-dictation.log)";

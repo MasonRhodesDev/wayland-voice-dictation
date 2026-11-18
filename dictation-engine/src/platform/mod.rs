@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -33,8 +34,8 @@ pub use imp::{
     audio_hotplug_dir, check_runtime_dependencies, copy_to_clipboard, daemon_exe, daemon_running,
     inhibit_idle, missing_permissions, notify_ready, notify_watchdog, pause_media_if_playing,
     request_permissions, resume_media, run_ime_probe, send_request, serve_control, spawn_overlay,
-    spawn_tray, type_text_with_progress, ControlServer, FocusTarget, IdleInhibitor, PausedMedia,
-    SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
+    spawn_tray, type_text_with_progress, wezterm_install, ControlServer, FocusTarget,
+    IdleInhibitor, PausedMedia, SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
 };
 #[cfg(not(feature = "correction"))]
 pub use no_correction::CorrectionLearning;
@@ -49,6 +50,12 @@ impl fmt::Display for Permission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} permission is missing: {}", self.name, self.remedy)
     }
+}
+
+#[derive(Debug)]
+pub struct WeztermInstall {
+    pub program: PathBuf,
+    pub socket_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]

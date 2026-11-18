@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use correction_engine::wezterm::WeztermCli;
 use correction_engine::{
     CorrectionMonitor, CorrectionStore, InjectionContext, MonitorConfig, WeztermMonitor,
 };
@@ -11,7 +12,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use super::imp::correction::{text_change_source, WEZTERM_APP_ID};
-use super::CorrectionSettings;
+use super::{wezterm_install, CorrectionSettings};
 use crate::post_processing::WordSubstitutionProcessor;
 
 pub struct CorrectionLearning {
@@ -59,8 +60,9 @@ impl CorrectionLearning {
                 Some(text_monitor) => Some(WeztermMonitor::with_shared_store(
                     text_monitor.store_handle(),
                     config.clone(),
+                    wezterm_cli,
                 )),
-                None => match WeztermMonitor::new(config.clone()) {
+                None => match WeztermMonitor::new(config.clone(), wezterm_cli) {
                     Ok(m) => Some(m),
                     Err(e) => {
                         warn!("Failed to initialize wezterm correction backend: {}", e);
@@ -68,10 +70,10 @@ impl CorrectionLearning {
                     }
                 },
             };
-            if monitor.is_some() {
+            if let Some(monitor) = &monitor {
                 info!(
                     "wezterm correction backend enabled (live socket now: {})",
-                    WeztermMonitor::is_available()
+                    monitor.is_available()
                 );
             }
             monitor
@@ -141,6 +143,11 @@ impl CorrectionLearning {
             _ => None,
         }
     }
+}
+
+fn wezterm_cli() -> Option<WeztermCli> {
+    let install = wezterm_install()?;
+    WeztermCli::discover(&install.program, &install.socket_dir)
 }
 
 async fn watch_corrections_file(store: Arc<Mutex<CorrectionStore>>, path: PathBuf) -> Result<()> {
