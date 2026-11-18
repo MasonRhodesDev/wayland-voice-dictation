@@ -455,6 +455,21 @@ fn overlay_visible(state: GuiState) -> bool {
     state_to_mode(state) != 0
 }
 
+#[cfg(any(target_os = "macos", test))]
+const DEFAULT_UI: &str = include_str!("../ui/dictation.slint");
+
+#[cfg(any(target_os = "macos", test))]
+fn compile_overlay(
+    ui_file: &str,
+    source: Option<String>,
+) -> std::result::Result<ComponentDefinition, String> {
+    let definition = compile_ui(ui_file, source, Some("Dictation"))?;
+    if let Err(e) = check_ui_contract(ui_file, &definition) {
+        error!("UI contract validation failed: {e}");
+    }
+    Ok(definition)
+}
+
 #[cfg(test)]
 mod idle_tests {
     use super::*;
@@ -505,6 +520,34 @@ mod idle_tests {
         ] {
             assert!(overlay_visible(state));
         }
+    }
+
+    #[test]
+    fn the_built_in_ui_keeps_the_full_property_contract() {
+        let definition = compile_overlay("dictation.slint", Some(DEFAULT_UI.to_string()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(check_ui_contract("dictation.slint", &definition), Ok(()));
+    }
+
+    #[test]
+    fn every_shipped_ui_loads_as_a_frameless_dictation_window() {
+        for (ui_file, source) in [
+            ("dictation.slint", DEFAULT_UI),
+            ("style1-default.slint", include_str!("../ui/examples/style1-default.slint")),
+            ("style2-minimal.slint", include_str!("../ui/examples/style2-minimal.slint")),
+        ] {
+            if let Err(e) = compile_overlay(ui_file, Some(source.to_string())) {
+                panic!("{e}");
+            }
+            assert!(source.contains("no-frame: true;"), "{ui_file} would show a title bar");
+        }
+    }
+
+    #[test]
+    fn a_ui_without_a_dictation_component_is_rejected() {
+        let other = "export component Other inherits Window {}".to_string();
+        let error = compile_overlay("other.slint", Some(other)).err().expect("no Dictation");
+        assert!(error.contains("other.slint"), "{error}");
     }
 
     #[test]

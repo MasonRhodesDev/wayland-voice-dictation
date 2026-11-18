@@ -2,8 +2,10 @@ use dictation_types::{GuiControl, GuiStatus};
 use hypr_slint_runtime::WakeHandle;
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSScreen, NSStatusWindowLevel, NSView, NSWindow, NSWindowCollectionBehavior};
-use objc2_foundation::NSPoint;
+use objc2_app_kit::{
+    NSScreen, NSStatusWindowLevel, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+};
+use objc2_foundation::{NSPoint, NSSize};
 use slint::winit_030::winit::event_loop::EventLoop;
 use slint::winit_030::winit::platform::macos::{
     ActivationPolicy, EventLoopBuilderExtMacOS, WindowAttributesExtMacOS,
@@ -22,19 +24,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::placement::{bottom_center, Rect, Size};
 use crate::{
-    apply_state, check_ui_contract, compile_ui, get_ui_config_dir, overlay_visible,
-    spawn_channel_listener, spawn_ui_clock, spawn_ui_file_watcher, GuiResult, SharedState, Spinner,
-    UiClock, EXIT_CODE_RELOAD,
+    apply_state, compile_overlay, get_ui_config_dir, overlay_visible, spawn_channel_listener,
+    spawn_ui_clock, spawn_ui_file_watcher, GuiResult, SharedState, Spinner, UiClock, DEFAULT_UI,
+    EXIT_CODE_RELOAD,
 };
 
-const DEFAULT_UI: &str = include_str!("../ui/dictation.slint");
-const OVERLAY_COMPONENT: &str = "OverlayWindow";
-const OVERLAY_WINDOW: &str = "
-export component OverlayWindow inherits Dictation {
-    no-frame: true;
-    title: \"Voice Dictation\";
-}
-";
 const OVERLAY_SIZE: Size = Size { width: 380.0, height: 90.0 };
 const BOTTOM_MARGIN: f64 = 50.0;
 const HIDE_DELAY: Duration = Duration::from_millis(100);
@@ -130,24 +124,12 @@ fn load_overlay() -> Result<ComponentDefinition, String> {
     if let Some(path) = user_ui {
         let ui_file = path.to_string_lossy();
         info!("Loading UI from: {}", ui_file);
-        let loaded = std::fs::read_to_string(&path)
-            .map_err(|e| format!("UI '{ui_file}' could not be read: {e}"))
-            .and_then(|source| compile_overlay(&ui_file, &source));
-        match loaded {
+        match compile_overlay(&ui_file, None) {
             Ok(definition) => return Ok(definition),
             Err(e) => error!("{e}; falling back to the built-in UI"),
         }
     }
-    compile_overlay("dictation.slint", DEFAULT_UI)
-}
-
-fn compile_overlay(ui_file: &str, source: &str) -> Result<ComponentDefinition, String> {
-    let definition =
-        compile_ui(ui_file, Some(format!("{source}{OVERLAY_WINDOW}")), Some(OVERLAY_COMPONENT))?;
-    if let Err(e) = check_ui_contract(ui_file, &definition) {
-        error!("UI contract validation failed: {e}");
-    }
-    Ok(definition)
+    compile_overlay("dictation.slint", Some(DEFAULT_UI.to_string()))
 }
 
 fn create_overlay(
@@ -226,6 +208,9 @@ fn ns_window(winit_window: &Window) -> Option<Retained<NSWindow>> {
 }
 
 fn configure(window: &NSWindow) {
+    window.orderOut(None);
+    window.setStyleMask(NSWindowStyleMask::Borderless);
+    window.setContentSize(NSSize::new(OVERLAY_SIZE.width, OVERLAY_SIZE.height));
     window.setLevel(NSStatusWindowLevel);
     window.setCollectionBehavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
@@ -235,7 +220,6 @@ fn configure(window: &NSWindow) {
     );
     window.setIgnoresMouseEvents(true);
     window.setHasShadow(false);
-    window.orderOut(None);
 }
 
 fn place(window: &NSWindow, mtm: MainThreadMarker) {
