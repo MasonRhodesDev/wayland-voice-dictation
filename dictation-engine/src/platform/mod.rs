@@ -4,6 +4,17 @@ use std::fmt;
 mod linux;
 #[cfg(target_os = "linux")]
 use linux as imp;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as imp;
+
+#[cfg(any(target_os = "macos", test))]
+mod lsappinfo;
+#[cfg(any(target_os = "macos", test))]
+mod unix_socket;
+#[cfg(any(target_os = "macos", test))]
+mod utf16;
 
 #[cfg(any(not(target_os = "linux"), not(feature = "correction")))]
 mod no_correction;

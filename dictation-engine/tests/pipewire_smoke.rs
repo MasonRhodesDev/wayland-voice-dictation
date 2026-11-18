@@ -1,4 +1,4 @@
-#![cfg(feature = "pipewire")]
+#![cfg(with_pipewire)]
 
 use dictation_engine::audio_backend::pipewire_backend::PipewireBackend;
 use dictation_engine::audio_backend::AudioBackendFactory;

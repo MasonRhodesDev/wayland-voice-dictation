@@ -691,6 +691,10 @@ pub async fn run() -> Result<()> {
         }
     });
 
+    for permission in platform::request_permissions() {
+        error!("{}", permission);
+    }
+
     let sample_rate: u32 = config.daemon.sample_rate.parse().unwrap_or_else(|_| {
         warn!("Invalid sample_rate '{}', defaulting to 16000", config.daemon.sample_rate);
         16000

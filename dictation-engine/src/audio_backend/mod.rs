@@ -1,6 +1,6 @@
 pub mod cpal_backend;
 
-#[cfg(feature = "pipewire")]
+#[cfg(with_pipewire)]
 pub mod pipewire_backend;
 
 use anyhow::Result;
@@ -53,7 +53,7 @@ pub enum BackendType {
     #[default]
     Auto,
     Cpal,
-    #[cfg(feature = "pipewire")]
+    #[cfg(with_pipewire)]
     Pipewire,
 }
 
@@ -63,7 +63,7 @@ impl BackendType {
         match s.to_lowercase().as_str() {
             "auto" => Some(Self::Auto),
             "cpal" | "alsa" => Some(Self::Cpal),
-            #[cfg(feature = "pipewire")]
+            #[cfg(with_pipewire)]
             "pipewire" | "pw" => Some(Self::Pipewire),
             _ => None,
         }
@@ -81,7 +81,7 @@ pub fn create_backend(
             info!("Using cpal audio backend");
             cpal_backend::CpalBackend::create(tx, config)
         }
-        #[cfg(feature = "pipewire")]
+        #[cfg(with_pipewire)]
         BackendType::Pipewire => {
             info!("Using PipeWire audio backend");
             pipewire_backend::PipewireBackend::create(tx, config)
@@ -93,7 +93,7 @@ fn create_backend_auto(
     tx: mpsc::UnboundedSender<Vec<i16>>,
     config: &AudioBackendConfig,
 ) -> Result<Box<dyn AudioBackend>> {
-    #[cfg(feature = "pipewire")]
+    #[cfg(with_pipewire)]
     {
         if pipewire_backend::PipewireBackend::is_available() {
             info!("PipeWire availability check passed, attempting to create backend...");
@@ -106,17 +106,17 @@ fn create_backend_auto(
                 Err(e) => {
                     warn!("PipeWire backend creation failed: {e}");
                     warn!("  Falling back to cpal/ALSA (will hold exclusive mic access)");
-                    warn!("  Check: systemctl --user status pipewire");
+                    warn!("  Check that the PipeWire user service is running");
                 }
             }
         } else {
             warn!("PipeWire not available on system");
-            warn!("  Check: systemctl --user status pipewire");
+            warn!("  Check that the PipeWire user service is running");
             warn!("  Using cpal/ALSA backend (will hold exclusive mic access)");
         }
     }
 
-    #[cfg(not(feature = "pipewire"))]
+    #[cfg(pipewire_disabled)]
     {
         warn!("PipeWire feature not enabled at compile time");
         warn!("  Rebuild with: cargo build --features pipewire");
@@ -188,7 +188,7 @@ fn list_devices_pactl() -> Result<Vec<DeviceInfo>> {
 fn list_devices_backend(backend_type: BackendType) -> Result<Vec<DeviceInfo>> {
     match backend_type {
         BackendType::Auto | BackendType::Cpal => cpal_backend::CpalBackend::list_devices(),
-        #[cfg(feature = "pipewire")]
+        #[cfg(with_pipewire)]
         BackendType::Pipewire => pipewire_backend::PipewireBackend::list_devices(),
     }
 }
