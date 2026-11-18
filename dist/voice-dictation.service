@@ -9,8 +9,6 @@ Restart=on-failure
 RestartSec=5
 RestartForceExitStatus=64
 WatchdogSec=30
-Environment="RUST_LOG=info"
-Environment="GUI_LOG=info"
 StandardOutput=journal
 StandardError=journal
 
