@@ -31,6 +31,10 @@ pub(super) fn accessibility() -> Permission {
     missing("Accessibility")
 }
 
+pub(super) fn automation() -> Permission {
+    missing("Automation")
+}
+
 fn microphone_status() -> Option<AVAuthorizationStatus> {
     let audio = unsafe { AVMediaTypeAudio }?;
     Some(unsafe { AVCaptureDevice::authorizationStatusForMediaType(audio) })

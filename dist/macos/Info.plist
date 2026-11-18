@@ -14,5 +14,7 @@
     <string>@VERSION@</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>voice-dictation records your voice while you dictate and turns it into typed text.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>voice-dictation pauses Music and Spotify while you dictate and resumes them afterwards.</string>
 </dict>
 </plist>

@@ -36,19 +36,19 @@ pub const SERVICE_STATUS_HINT: &str = "systemctl --user status voice-dictation";
 pub const SERVICE_START_HINT: &str = "systemctl --user start voice-dictation";
 pub const SERVICE_RESTART_HINT: &str = "systemctl --user restart voice-dictation";
 
-pub fn pause_media_if_playing() -> bool {
-    let Ok(output) = Command::new("playerctl").arg("status").output() else {
-        return false;
-    };
-    let playing = String::from_utf8_lossy(&output.stdout).contains("Playing");
-    if playing {
-        let _ = Command::new("playerctl").arg("pause").output();
-        info!("Paused media playback");
+pub struct PausedMedia;
+
+pub fn pause_media_if_playing() -> Option<PausedMedia> {
+    let output = Command::new("playerctl").arg("status").output().ok()?;
+    if !String::from_utf8_lossy(&output.stdout).contains("Playing") {
+        return None;
     }
-    playing
+    let _ = Command::new("playerctl").arg("pause").output();
+    info!("Paused media playback");
+    Some(PausedMedia)
 }
 
-pub fn resume_media() {
+pub fn resume_media(_paused: PausedMedia) {
     let _ = Command::new("playerctl").arg("play").output();
     info!("Resumed media playback");
 }

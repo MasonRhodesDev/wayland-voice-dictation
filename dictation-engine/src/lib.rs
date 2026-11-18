@@ -922,7 +922,7 @@ pub async fn run() -> Result<()> {
     let mut session: Option<RecordingSession> = None;
     let mut audio_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut preview_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut media_was_playing = false;
+    let mut media_pause: Option<tokio::task::JoinHandle<Option<platform::PausedMedia>>> = None;
     let mut _idle_inhibit: Option<platform::IdleInhibitor> = None;
     let mut focus_target: Option<platform::FocusTarget> = None;
     let mut restart_requested = false;
@@ -955,7 +955,8 @@ pub async fn run() -> Result<()> {
                             if let Some(ref target) = focus_target {
                                 info!("Captured focus target: class={}", target.class());
                             }
-                            media_was_playing = platform::pause_media_if_playing();
+                            media_pause =
+                                Some(tokio::task::spawn_blocking(platform::pause_media_if_playing));
 
                             _idle_inhibit = match platform::inhibit_idle(
                                 "Active voice dictation session",
@@ -1310,12 +1311,15 @@ pub async fn run() -> Result<()> {
             DaemonState::Processing => {
                 info!("Entering Processing state");
 
-                if media_was_playing {
-                    media_was_playing = false;
+                if let Some(pause) = media_pause.take() {
                     let delay = config.daemon.media_resume_delay_ms;
                     tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
-                        platform::resume_media();
+                        if let Ok(Some(paused)) = pause.await {
+                            tokio::time::sleep(Duration::from_millis(delay)).await;
+                            let _ =
+                                tokio::task::spawn_blocking(move || platform::resume_media(paused))
+                                    .await;
+                        }
                     });
                 }
 
