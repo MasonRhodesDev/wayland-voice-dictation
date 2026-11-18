@@ -1144,9 +1144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Correction monitoring re-armed for the last dictation");
         }
         Commands::CorrectionStats => {
-            let home = std::env::var("HOME")?;
-            let corrections_path = std::path::PathBuf::from(&home)
-                .join(".local/share/voice-dictation/corrections.json");
+            let corrections_path = correction_engine::MonitorConfig::default().store_path;
             if corrections_path.exists() {
                 let content = fs::read_to_string(&corrections_path)?;
                 let data: Value = serde_json::from_str(&content)?;

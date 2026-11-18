@@ -44,6 +44,7 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "rustls-tls"] }
 futures-util = "0.3"
 libc = "0.2"
+correction-engine = { path = "../correction-engine", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 slint-gui = { path = "../slint-gui" }
@@ -54,7 +55,6 @@ wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 pipewire = { version = "0.10", optional = true }
 ksni = { git = "https://github.com/iovxw/ksni.git", rev = "4d2320c", optional = true }
-correction-engine = { path = "../correction-engine", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.9"

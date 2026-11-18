@@ -1,6 +1,6 @@
 mod control;
 #[cfg(feature = "correction")]
-mod correction;
+pub(super) mod correction;
 mod focus;
 mod idle;
 mod ime_probe;
@@ -18,13 +18,9 @@ use tracing::info;
 use crate::platform::Permission;
 use crate::{GuiControl, GuiStatus};
 
-#[cfg(not(feature = "correction"))]
-pub use super::no_correction::CorrectionLearning;
 #[cfg(not(feature = "tray"))]
 pub use super::no_tray::spawn_tray;
 pub use control::{daemon_exe, daemon_running, send_request, serve_control, ControlServer};
-#[cfg(feature = "correction")]
-pub use correction::CorrectionLearning;
 pub use focus::FocusTarget;
 pub use idle::{inhibit_idle, IdleInhibitor};
 pub use ime_probe::run as run_ime_probe;

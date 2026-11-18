@@ -1,5 +1,5 @@
 use correction_engine::connection::{AtspiConnection, TextChangeSource};
-use correction_engine::types::{TextChangeEvent, TextChangeOp};
+use correction_engine::types::{InjectionContext, TextChangeEvent, TextChangeOp};
 use std::path::Path;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
@@ -88,7 +88,14 @@ async fn atspi_receives_real_text_change_events() {
         "AT-SPI2 bus reported unavailable inside the e2e container; \
          dbus/at-spi2-registryd wiring is broken"
     );
-    let mut rx = conn.subscribe().await.expect("subscribe() failed");
+    let context = InjectionContext {
+        text: String::new(),
+        timestamp: chrono::Utc::now(),
+        instant: std::time::Instant::now(),
+        window_class: String::new(),
+        window_title: String::new(),
+    };
+    let mut rx = conn.subscribe(&context).await.expect("subscribe() failed");
 
     sleep(Duration::from_millis(500)).await;
     std::fs::write(SUBSCRIBED_MARKER, b"subscribed\n").expect("failed to write subscribed marker");

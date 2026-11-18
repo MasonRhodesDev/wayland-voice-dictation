@@ -18,18 +18,24 @@ mod unix_socket;
 #[cfg(any(target_os = "macos", test))]
 mod utf16;
 
+#[cfg(all(target_os = "linux", feature = "correction"))]
+mod correction;
 #[cfg(any(not(target_os = "linux"), not(feature = "correction")))]
 mod no_correction;
 #[cfg(any(not(target_os = "linux"), not(feature = "tray")))]
 mod no_tray;
 
+#[cfg(all(target_os = "linux", feature = "correction"))]
+pub use correction::CorrectionLearning;
 pub use imp::{
     audio_hotplug_dir, check_runtime_dependencies, copy_to_clipboard, daemon_exe, daemon_running,
     inhibit_idle, missing_permissions, notify_ready, notify_watchdog, pause_media_if_playing,
     request_permissions, resume_media, run_ime_probe, send_request, serve_control, spawn_overlay,
-    spawn_tray, type_text_with_progress, ControlServer, CorrectionLearning, FocusTarget,
-    IdleInhibitor, PausedMedia, SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
+    spawn_tray, type_text_with_progress, ControlServer, FocusTarget, IdleInhibitor, PausedMedia,
+    SERVICE_RESTART_HINT, SERVICE_START_HINT, SERVICE_STATUS_HINT,
 };
+#[cfg(any(not(target_os = "linux"), not(feature = "correction")))]
+pub use no_correction::CorrectionLearning;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Permission {

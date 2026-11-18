@@ -11,7 +11,6 @@ use tokio::sync::{broadcast, mpsc};
 use crate::platform::ImeProbeOptions;
 use crate::{GuiControl, GuiStatus};
 
-pub use super::no_correction::CorrectionLearning;
 pub use super::no_tray::spawn_tray;
 pub use control::{daemon_exe, daemon_running, send_request, serve_control, ControlServer};
 pub use focus::FocusTarget;

@@ -59,9 +59,7 @@ pub struct MonitorConfig {
 
 impl Default for MonitorConfig {
     fn default() -> Self {
-        let vd_dir = xdg_paths::ConfigDirs::from_env()
-            .map(|d| d.data_dir("voice-dictation"))
-            .unwrap_or_default();
+        let vd_dir = dirs::data_dir().map(|d| d.join("voice-dictation")).unwrap_or_default();
 
         Self {
             enabled: true,
