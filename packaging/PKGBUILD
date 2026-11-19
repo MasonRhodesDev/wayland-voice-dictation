@@ -1,7 +1,7 @@
 # Maintainer: Mason Rhodes <mrhodesdev@gmail.com>
 
 pkgname=wayland-voice-dictation
-pkgver=0.7.1
+pkgver=0.8.0
 pkgrel=1
 pkgdesc='Offline voice dictation for Wayland desktops with Parakeet speech recognition'
 arch=('x86_64' 'aarch64')
