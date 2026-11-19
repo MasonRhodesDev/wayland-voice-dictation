@@ -3,7 +3,7 @@
 %global __cargo_common_opts %{?_smp_mflags} -Z avoid-dev-deps --locked
 
 Name:           wayland-voice-dictation
-Version:        0.7.1
+Version:        0.8.0
 Release:        1%{?dist}
 Obsoletes:      hyprland-voice-dictation < 0.6.0
 Provides:       hyprland-voice-dictation = %{version}-%{release}
@@ -80,6 +80,23 @@ install -Dpm0755 scripts/download-parakeet-model.sh %{buildroot}%{_datadir}/%{na
 %{_datadir}/%{name}/download-parakeet-model.sh
 
 %changelog
+* Thu Nov 19 2026 Mason Rhodes <mrhodesdev@gmail.com> - 0.8.0-1
+- macOS support behind a per-OS platform layer. Linux keeps its D-Bus
+  interface, CLI and service unchanged.
+- Logs default to WARN, and the systemd unit no longer forces RUST_LOG=info.
+- Restart Daemon no longer races the overlay's exit, so systemd reliably
+  restarts it.
+- confirm queues behind a pending start, so a quick push-to-talk tap no
+  longer leaves the daemon recording.
+- cpal falls back to the device's native format and resamples when it cannot
+  open mono 16 kHz, and builds its streams paused.
+- download-model writes each file to a .part file first, so an interrupted
+  download is retried instead of skipped.
+- Correction learning matches AT-SPI events to the focused window by pid, so
+  it learns on Hyprland, and no longer learns from a cleared, sent or
+  replaced dictation.
+- ammonia 4.2.5 for RUSTSEC-2026-0533.
+
 * Tue Nov 10 2026 Mason Rhodes <mrhodesdev@gmail.com> - 0.7.1-1
 - The overlay survives a monitor being removed. It destroyed its wl_surface
   before the layer surface, which Hyprland answers with a fatal "invalid
