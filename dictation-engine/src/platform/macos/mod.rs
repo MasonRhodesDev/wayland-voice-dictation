@@ -10,7 +10,7 @@ mod tray;
 mod ui;
 mod wezterm;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
 use crate::platform::ImeProbeOptions;
@@ -32,19 +32,6 @@ pub const SERVICE_STATUS_HINT: &str =
 pub const SERVICE_START_HINT: &str = "launchctl kickstart gui/$(id -u)/com.voicedictation.daemon";
 pub const SERVICE_RESTART_HINT: &str =
     "launchctl kickstart -k gui/$(id -u)/com.voicedictation.daemon";
-
-pub struct IdleInhibitor {
-    _caffeinate: tokio::process::Child,
-}
-
-pub async fn inhibit_idle(_reason: &str) -> Result<IdleInhibitor> {
-    let caffeinate = tokio::process::Command::new("caffeinate")
-        .args(["-i", "-w", &std::process::id().to_string()])
-        .kill_on_drop(true)
-        .spawn()
-        .context("Failed to run caffeinate")?;
-    Ok(IdleInhibitor { _caffeinate: caffeinate })
-}
 
 pub fn notify_ready() -> Result<()> {
     Ok(())

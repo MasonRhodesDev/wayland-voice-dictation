@@ -13,5 +13,5 @@ jobs:
   ci:
     uses: MasonRhodesDev/packaging-workflows/.github/workflows/rust-ci.yml@v1
     with:
-      pacman-deps: pipewire alsa-lib fontconfig freetype2 libxkbcommon wayland systemd pkgconf
+      pacman-deps: pipewire alsa-lib fontconfig freetype2 libxkbcommon wayland pkgconf
       cargo-flags: --no-default-features --features tray,correction
