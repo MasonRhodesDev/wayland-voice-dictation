@@ -12,6 +12,7 @@ ignore = [
     { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained; same zbus 5 pin as 2026-0370" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; same zbus 5 pin as 2026-0370" },
     { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained; reached only through slint's spin_on, no upgrade available" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; i-slint-core depends on it, so it stays in the tree until slint moves" },
 ]
 
 [licenses]

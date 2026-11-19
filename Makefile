@@ -1,8 +1,7 @@
+UNAME   := $(shell uname -s)
 BINDIR  ?= $(HOME)/.local/bin
-UNITDIR ?= $(HOME)/.config/systemd/user
 
 BIN     := $(BINDIR)/voice-dictation
-UNIT    := $(UNITDIR)/voice-dictation.service
 RELEASE := target/release/voice-dictation
 
 SHADOW  := $(HOME)/.cargo/bin/voice-dictation
@@ -14,9 +13,39 @@ all: build
 build:
 	cargo build --release
 
+ifeq ($(UNAME),Darwin)
+AGENTDIR ?= $(HOME)/Library/LaunchAgents
+LOGFILE  ?= $(HOME)/Library/Logs/voice-dictation.log
+LABEL    := com.voicedictation.daemon
+AGENT    := $(AGENTDIR)/$(LABEL).plist
+
+install: build
+	@if [ -z "$(ORT_DYLIB_PATH)" ]; then \
+		echo ">> ORT_DYLIB_PATH is not set. Point it at libonnxruntime.dylib:"; \
+		echo ">>   ORT_DYLIB_PATH=/path/to/libonnxruntime.dylib make install"; \
+		exit 1; \
+	fi
+	install -d $(BINDIR) $(AGENTDIR) $(dir $(LOGFILE))
+	install -m755 $(RELEASE) $(BIN)
+	sed -e 's|@BINARY@|$(BIN)|' -e 's|@LOGFILE@|$(LOGFILE)|' \
+		-e 's|@ORT_DYLIB_PATH@|$(ORT_DYLIB_PATH)|' dist/macos/$(LABEL).plist > $(AGENT)
+	-launchctl bootout gui/$$(id -u)/$(LABEL) 2>/dev/null
+	launchctl bootstrap gui/$$(id -u) $(AGENT)
+	@echo ">> Installed $(BIN); daemon log: $(LOGFILE)"
+	@echo ">> Allow $(BIN) under System Settings > Privacy & Security > Microphone and Accessibility"
+	@$(MAKE) --no-print-directory doctor
+
+uninstall:
+	-launchctl bootout gui/$$(id -u)/$(LABEL)
+	rm -f $(BIN) $(AGENT)
+	@echo ">> Uninstalled. Model & config under ~/.config/voice-dictation were kept."
+else
+UNITDIR ?= $(HOME)/.config/systemd/user
+UNIT    := $(UNITDIR)/voice-dictation.service
+
 install: build
 	install -Dm755 $(RELEASE) $(BIN)
-	install -Dm644 packaging/systemd/voice-dictation.service $(UNIT)
+	install -Dm644 dist/voice-dictation.service $(UNIT)
 	systemctl --user daemon-reload
 	@if [ -e "$(SHADOW)" ] && [ "$(SHADOW)" != "$(BIN)" ]; then \
 		echo ">> Removing stale shadow binary: $(SHADOW)"; \
@@ -37,6 +66,7 @@ uninstall:
 	rm -f $(UNIT)
 	systemctl --user daemon-reload
 	@echo ">> Uninstalled. Model & config under ~/.config/voice-dictation were kept."
+endif
 
 doctor:
 	@echo "Binary consistency check:"

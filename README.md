@@ -40,7 +40,7 @@ flowchart TD
 - Wayland compositor (Hyprland, Sway, etc.)
 - `wtype` — keyboard input injection
 - PipeWire or ALSA audio
-- ~1.6 GB disk space for the Parakeet model
+- ~2.5 GB disk space for the Parakeet model
 
 Optional: `playerctl` for media pause/resume.
 
@@ -107,9 +107,32 @@ make uninstall
 > The packaged installs above are immune to this: they own the single copy in
 > `/usr/bin`. Don't mix a dev install with a packaged one.
 
+### macOS
+
+Apple silicon only. You need the Xcode Command Line Tools (`xcode-select --install`),
+Rust, and an onnxruntime `libonnxruntime.dylib`, passed in as `ORT_DYLIB_PATH`:
+
+```bash
+ORT_DYLIB_PATH=/path/to/libonnxruntime.dylib make install
+voice-dictation download-model
+```
+
+`make install` puts the binary in `~/.local/bin` and loads a LaunchAgent
+(`com.voicedictation.daemon`) that runs the daemon at login, restarts it after a crash or
+**Restart Daemon** but not after **Quit**, and logs to
+`~/Library/Logs/voice-dictation.log`. On first start macOS asks for two permissions for
+that binary under System Settings > Privacy & Security: **Microphone** and
+**Accessibility**. Grant both, then restart the daemon with
+`launchctl kickstart -k gui/$(id -u)/com.voicedictation.daemon`. A rebuilt binary may
+need the permissions granted again.
+
+For push to talk, bind a hotkey tool to run `voice-dictation start` on key press and
+`voice-dictation confirm` on release, or `voice-dictation toggle` on a single key. Media
+pause covers Music and Spotify.
+
 ## Download the Model
 
-The Parakeet model (~1.6 GB) is not included and must be downloaded separately:
+The Parakeet model (~2.5 GB) is not included and must be downloaded separately:
 
 ```bash
 voice-dictation download-model

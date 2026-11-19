@@ -1,19 +1,17 @@
 use clap::{Parser, Subcommand};
+use dictation_engine::control::{ControlReply, ControlRequest, DaemonState};
+use dictation_engine::platform;
 use schema_tui::SchemaTUIBuilder;
 use serde_json::Value;
 use std::fs;
+use std::future::Future;
 use std::io::{self, Write as IoWrite};
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
-use zbus::Connection;
 
 mod utils;
-
-const DBUS_SERVICE_NAME: &str = "com.voicedictation.Daemon";
-const DBUS_OBJECT_PATH: &str = "/com/voicedictation/Control";
-const DBUS_INTERFACE_NAME: &str = "com.voicedictation.Control";
 
 #[derive(Parser)]
 #[command(name = "voice-dictation")]
@@ -198,7 +196,7 @@ enum DebugCommands {
         about = "Time-boxed zwp_input_method_v2 diagnostic probe (holds the compositor IME slot)",
         long_about = "Bind zwp_input_method_v2 for a fixed number of seconds and log every IME\n\
                       event (activate/deactivate, surrounding_text, text_change_cause,\n\
-                      content_type), tagged with the focused window class from hyprctl.\n\n\
+                      content_type), tagged with the focused window class.\n\n\
                       Never grabs the keyboard. Exits immediately if another IME holds the slot.\n\
                       --commit sends commit_string into the focused editor for write-path\n\
                       validation, but ONLY while a window whose class exactly matches\n\
@@ -223,163 +221,55 @@ enum DebugCommands {
     },
 }
 
-async fn call_status() -> Result<(String, bool), Box<dyn std::error::Error>> {
-    let connection = Connection::session().await?;
-    let proxy =
-        zbus::Proxy::new(&connection, DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE_NAME)
-            .await?;
-
-    let result: (String, bool) = proxy.call("Status", &()).await?;
-    Ok(result)
+fn block_on<T>(future: impl Future<Output = T>) -> Result<T, Box<dyn std::error::Error>> {
+    Ok(tokio::runtime::Runtime::new()?.block_on(future))
 }
 
-fn get_state() -> Result<String, Box<dyn std::error::Error>> {
-    tokio::runtime::Runtime::new()?
-        .block_on(call_status())
-        .map(|(state, _session_active)| state)
-        .map_err(dbus_error_with_hint)
+fn request(req: ControlRequest) -> Result<ControlReply, Box<dyn std::error::Error>> {
+    block_on(platform::send_request(req))?.map_err(|e| {
+        format!("Failed to communicate with daemon: {}\nTry: {}", e, platform::SERVICE_STATUS_HINT)
+            .into()
+    })
 }
 
-async fn call_dbus_method(method: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let connection = Connection::session().await?;
-    let proxy =
-        zbus::Proxy::new(&connection, DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE_NAME)
-            .await?;
-
-    proxy.call::<_, _, ()>(method, &()).await?;
-    Ok(())
+fn send(req: ControlRequest) -> Result<(), Box<dyn std::error::Error>> {
+    match request(req)? {
+        ControlReply::Error(message) => Err(message.into()),
+        _ => Ok(()),
+    }
 }
 
-fn send_start_recording() -> Result<(), Box<dyn std::error::Error>> {
-    tokio::runtime::Runtime::new()?
-        .block_on(call_dbus_method("StartRecording"))
-        .map_err(dbus_error_with_hint)
-}
-
-fn send_stop_recording() -> Result<(), Box<dyn std::error::Error>> {
-    tokio::runtime::Runtime::new()?
-        .block_on(call_dbus_method("StopRecording"))
-        .map_err(dbus_error_with_hint)
-}
-
-fn send_confirm() -> Result<(), Box<dyn std::error::Error>> {
-    tokio::runtime::Runtime::new()?
-        .block_on(call_dbus_method("Confirm"))
-        .map_err(dbus_error_with_hint)
-}
-
-fn dbus_error_with_hint(e: Box<dyn std::error::Error>) -> Box<dyn std::error::Error> {
-    format!(
-        "Failed to communicate with daemon: {}\nTry: systemctl --user status voice-dictation",
-        e
-    )
-    .into()
-}
-
-async fn call_health_check() -> Result<(String, String, String), Box<dyn std::error::Error>> {
-    let connection = Connection::session().await?;
-    let proxy =
-        zbus::Proxy::new(&connection, DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE_NAME)
-            .await?;
-
-    let result: (String, String, String) = proxy.call("HealthCheck", &()).await?;
-    Ok(result)
-}
-
-fn get_health_check() -> Result<(String, String, String), Box<dyn std::error::Error>> {
-    tokio::runtime::Runtime::new()?.block_on(call_health_check())
+fn get_state() -> Result<DaemonState, Box<dyn std::error::Error>> {
+    match request(ControlRequest::Status)? {
+        ControlReply::Status { state, .. } => Ok(state),
+        other => Err(format!("Unexpected status reply: {:?}", other).into()),
+    }
 }
 
 fn is_daemon_running() -> bool {
-    if let Ok(rt) = tokio::runtime::Runtime::new() {
-        rt.block_on(async {
-            if let Ok(conn) = Connection::session().await {
-                if let Ok(proxy) = zbus::Proxy::new(
-                    &conn,
-                    DBUS_SERVICE_NAME,
-                    DBUS_OBJECT_PATH,
-                    DBUS_INTERFACE_NAME,
-                )
-                .await
-                {
-                    proxy.introspect().await.is_ok()
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        })
-    } else {
-        false
-    }
+    block_on(platform::daemon_running()).unwrap_or(false)
 }
 
-fn check_command_available(cmd: &str) -> bool {
-    Command::new("which").arg(cmd).output().map(|output| output.status.success()).unwrap_or(false)
-}
-
-fn check_runtime_dependencies(
-    require_wtype: bool,
-    require_wayland: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut missing = Vec::new();
-    let mut warnings = Vec::new();
-
-    if require_wtype && !check_command_available("wtype") {
-        missing.push("wtype - required for keyboard input injection");
+fn require_daemon() -> Result<(), Box<dyn std::error::Error>> {
+    if is_daemon_running() {
+        return Ok(());
     }
-
-    if require_wayland && std::env::var("WAYLAND_DISPLAY").is_err() {
-        if std::env::var("DISPLAY").is_ok() {
-            missing.push("Wayland compositor - X11 detected but Wayland is required");
-        } else {
-            missing.push("Wayland compositor - no display server detected");
-        }
-    }
-
-    if !check_command_available("pactl") && !check_command_available("pw-cli") {
-        warnings.push("pactl or pw-cli - audio device enumeration may not work");
-    }
-
-    if !warnings.is_empty() {
-        eprintln!("Warnings:");
-        for warning in warnings {
-            eprintln!("  - {}", warning);
-        }
-        eprintln!();
-    }
-
-    if !missing.is_empty() {
-        eprintln!("Missing required runtime dependencies:");
-        for dep in missing {
-            eprintln!("  - {}", dep);
-        }
-        eprintln!();
-        eprintln!("Install missing dependencies:");
-        eprintln!("  Arch: sudo pacman -S wtype pipewire");
-        eprintln!("  Fedora: sudo dnf install wtype pipewire");
-        return Err("Missing runtime dependencies".into());
-    }
-
-    Ok(())
+    eprintln!("Error: Daemon not running");
+    eprintln!("Start the daemon with: {}", platform::SERVICE_START_HINT);
+    eprintln!("Or run manually: voice-dictation daemon");
+    Err("Daemon not running".into())
 }
 
 fn start_recording() -> Result<(), Box<dyn std::error::Error>> {
-    if !is_daemon_running() {
-        eprintln!("Error: Daemon not running");
-        eprintln!("Start the daemon with: systemctl --user start voice-dictation");
-        eprintln!("Or run manually: voice-dictation daemon");
-        return Err("Daemon not running".into());
-    }
+    require_daemon()?;
 
     let state = get_state()?;
-    if state == "recording" {
+    if state == DaemonState::Recording {
         println!("Already recording");
         return Ok(());
     }
 
-    send_start_recording()?;
+    send(ControlRequest::StartRecording)?;
     println!("Voice dictation started - recording");
 
     Ok(())
@@ -392,33 +282,28 @@ fn stop_recording() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let state = get_state()?;
-    if state == "idle" || state == "stopped" {
+    if state == DaemonState::Idle {
         println!("Not recording");
         return Ok(());
     }
 
-    send_stop_recording()?;
+    send(ControlRequest::StopRecording)?;
     println!("Recording canceled");
 
     Ok(())
 }
 
 fn confirm_recording() -> Result<(), Box<dyn std::error::Error>> {
-    if !is_daemon_running() {
-        eprintln!("Error: Daemon not running");
-        eprintln!("Start the daemon with: systemctl --user start voice-dictation");
-        eprintln!("Or run manually: voice-dictation daemon");
-        return Err("Daemon not running".into());
-    }
+    require_daemon()?;
 
     let state = get_state()?;
-    if state != "recording" {
+    if state == DaemonState::Processing {
         eprintln!("Not in recording state (current: {})", state);
         return Err("Invalid state".into());
     }
 
     println!("Confirming transcription...");
-    send_confirm()?;
+    send(ControlRequest::Confirm)?;
 
     thread::sleep(Duration::from_millis(500));
 
@@ -428,19 +313,12 @@ fn confirm_recording() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn toggle_recording() -> Result<(), Box<dyn std::error::Error>> {
-    if !is_daemon_running() {
-        eprintln!("Error: Daemon not running");
-        eprintln!("Start the daemon with: systemctl --user start voice-dictation");
-        eprintln!("Or run manually: voice-dictation daemon");
-        return Err("Daemon not running".into());
-    }
+    require_daemon()?;
 
-    let state = get_state()?;
-
-    match state.as_str() {
-        "idle" | "stopped" => start_recording(),
-        "recording" => confirm_recording(),
-        _ => {
+    match get_state()? {
+        DaemonState::Idle => start_recording(),
+        DaemonState::Recording => confirm_recording(),
+        state @ DaemonState::Processing => {
             eprintln!("Unknown state: {}", state);
             Err("Unknown state".into())
         }
@@ -457,16 +335,16 @@ fn show_status() {
             Err(e) => println!("State: unavailable ({})", e),
         }
 
-        match get_health_check() {
-            Ok((gui, engine, audio)) => {
+        match block_on(platform::send_request(ControlRequest::HealthCheck)) {
+            Ok(Ok(ControlReply::Health { gui, engine, audio })) => {
                 println!("\nSubsystem Health:");
                 println!("  GUI:    {}", gui);
                 println!("  Engine: {}", engine);
                 println!("  Audio:  {}", audio);
             }
-            Err(e) => {
-                println!("Health check unavailable: {}", e);
-            }
+            Ok(Ok(other)) => println!("Health check unavailable: {:?}", other),
+            Ok(Err(e)) => println!("Health check unavailable: {}", e),
+            Err(e) => println!("Health check unavailable: {}", e),
         }
     }
 }
@@ -714,19 +592,23 @@ fn debug_play(filename: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn debug_wezterm_probe() -> Result<(), Box<dyn std::error::Error>> {
-    use correction_engine::wezterm::{discover_socket, WeztermCli, WeztermClient};
+    use correction_engine::wezterm::{WeztermCli, WeztermClient};
 
-    let Some(socket) = discover_socket() else {
+    let Some(install) = platform::wezterm_install() else {
+        println!("WezTerm: NOT FOUND (cannot locate the wezterm CLI or its socket directory)");
+        return Ok(());
+    };
+    println!("CLI:    {}", install.program.display());
+    let Some(cli) = WeztermCli::discover(&install.program, &install.socket_dir) else {
         println!("Socket: NOT FOUND");
         println!(
-            "No live wezterm socket under $XDG_RUNTIME_DIR/wezterm/ (and $WEZTERM_UNIX_SOCKET \
-             is unset or stale). Is a wezterm GUI instance running?"
+            "No live wezterm socket under {} (and $WEZTERM_UNIX_SOCKET is unset or stale). \
+             Is a wezterm GUI instance running?",
+            install.socket_dir.display()
         );
         return Ok(());
     };
-    println!("Socket: {}", socket.display());
-
-    let cli = WeztermCli::with_socket(socket);
+    println!("Socket: {}", cli.socket().display());
     tokio::runtime::Runtime::new()?.block_on(async move {
         let panes = cli.list_panes().await?;
         println!("Panes:  {}", panes.len());
@@ -997,24 +879,6 @@ fn binaries_on_path(name: &str) -> Vec<PathBuf> {
     found
 }
 
-async fn get_daemon_pid() -> Option<u32> {
-    let connection = Connection::session().await.ok()?;
-    let proxy = zbus::Proxy::new(
-        &connection,
-        "org.freedesktop.DBus",
-        "/org/freedesktop/DBus",
-        "org.freedesktop.DBus",
-    )
-    .await
-    .ok()?;
-    proxy.call("GetConnectionUnixProcessID", &(DBUS_SERVICE_NAME)).await.ok()
-}
-
-fn daemon_exe() -> Option<PathBuf> {
-    let pid = tokio::runtime::Runtime::new().ok()?.block_on(get_daemon_pid())?;
-    fs::read_link(format!("/proc/{}/exe", pid)).ok()
-}
-
 fn check_binary_consistency() {
     println!("\nBinary consistency:");
     println!("  Version: {}", env!("CARGO_PKG_VERSION"));
@@ -1034,7 +898,7 @@ fn check_binary_consistency() {
         println!("  Client binary: {}", b.display());
     }
 
-    match daemon_exe() {
+    match block_on(platform::daemon_exe()).ok().flatten() {
         Some(daemon) => {
             println!("  Daemon binary: {}", daemon.display());
             let daemon_canonical = fs::canonicalize(&daemon).unwrap_or_else(|_| daemon.clone());
@@ -1042,7 +906,7 @@ fn check_binary_consistency() {
                 if *self_canonical != daemon_canonical {
                     println!("  WARNING: client and daemon are different binaries.");
                     println!("  Restart the daemon so it matches the installed binary:");
-                    println!("    systemctl --user restart voice-dictation");
+                    println!("    {}", platform::SERVICE_RESTART_HINT);
                 }
             }
         }
@@ -1148,7 +1012,7 @@ fn download_model() -> Result<(), Box<dyn std::error::Error>> {
             let size = fs::metadata(&dest)?.len();
             if size > 0 {
                 println!(
-                    "  {} — already exists ({:.1} MB), skipping",
+                    "  {} already exists ({:.1} MB), skipping",
                     filename,
                     size as f64 / 1_048_576.0
                 );
@@ -1160,7 +1024,7 @@ fn download_model() -> Result<(), Box<dyn std::error::Error>> {
         print!("  Downloading {}... ", filename);
         io::stdout().flush()?;
 
-        let response = client.get(&url).send()?;
+        let mut response = client.get(&url).send()?;
         if !response.status().is_success() {
             eprintln!("HTTP {}", response.status());
             return Err(
@@ -1168,22 +1032,15 @@ fn download_model() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        let total = response.content_length();
-        let bytes = response.bytes()?;
-        let size = bytes.len();
-
-        fs::write(&dest, &bytes)?;
-
-        if let Some(t) = total {
-            println!("{:.1} MB", t as f64 / 1_048_576.0);
-        } else {
-            println!("{:.1} MB", size as f64 / 1_048_576.0);
-        }
+        let partial = model_dir.join(format!("{}.part", filename));
+        let size = io::copy(&mut response, &mut fs::File::create(&partial)?)?;
+        fs::rename(&partial, &dest)?;
+        println!("{:.1} MB", size as f64 / 1_048_576.0);
     }
 
     println!();
     println!("Model download complete.");
-    println!("You can now start the daemon: systemctl --user start voice-dictation");
+    println!("You can now start the daemon: {}", platform::SERVICE_START_HINT);
 
     Ok(())
 }
@@ -1193,22 +1050,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Daemon => {
-            check_runtime_dependencies(true, true)?;
+            platform::check_runtime_dependencies(true, true)?;
             dictation_engine::run()?;
         }
         Commands::Start => {
-            check_runtime_dependencies(true, false)?;
+            platform::check_runtime_dependencies(true, false)?;
             start_recording()?;
         }
         Commands::Stop => {
             stop_recording()?;
         }
         Commands::Confirm => {
-            check_runtime_dependencies(true, false)?;
+            platform::check_runtime_dependencies(true, false)?;
             confirm_recording()?;
         }
         Commands::Toggle => {
-            check_runtime_dependencies(true, false)?;
+            platform::check_runtime_dependencies(true, false)?;
             toggle_recording()?;
         }
         Commands::Status => {
@@ -1262,7 +1119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             DebugCommands::Play { filename } => debug_play(&filename)?,
             DebugCommands::WeztermProbe => debug_wezterm_probe()?,
             DebugCommands::ImeProbe { secs, json, commit, commit_class } => {
-                dictation_engine::ime_probe::run(dictation_engine::ime_probe::ProbeOptions {
+                platform::run_ime_probe(platform::ImeProbeOptions {
                     secs,
                     json,
                     commit_text: commit,
@@ -1280,15 +1137,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             test_loop_ui::run(recording.as_deref())?;
         }
         Commands::SnapshotCorrection => {
-            tokio::runtime::Runtime::new()?
-                .block_on(call_dbus_method("SnapshotCorrection"))
-                .map_err(dbus_error_with_hint)?;
+            send(ControlRequest::SnapshotCorrection)?;
             println!("Correction monitoring re-armed for the last dictation");
         }
         Commands::CorrectionStats => {
-            let home = std::env::var("HOME")?;
-            let corrections_path = std::path::PathBuf::from(&home)
-                .join(".local/share/voice-dictation/corrections.json");
+            let corrections_path = correction_engine::MonitorConfig::default().store_path;
             if corrections_path.exists() {
                 let content = fs::read_to_string(&corrections_path)?;
                 let data: Value = serde_json::from_str(&content)?;

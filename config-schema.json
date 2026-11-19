@@ -130,7 +130,7 @@
         {
           "id": "enable_correction_learning",
           "label": "Correction Learning",
-          "description": "Automatically detect when you correct transcribed text and learn from corrections. Requires AT-SPI2 accessibility bus (available by default on GNOME/KDE). ~1-2ms per injection (background monitoring).",
+          "description": "Automatically detect when you correct transcribed text and learn from corrections. Requires the AT-SPI2 accessibility bus on Linux (available by default on GNOME/KDE) or the Accessibility permission on macOS. ~1-2ms per injection (background monitoring).",
           "type": "boolean",
           "default": true,
           "ui_widget": "toggle"

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.voicedictation.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@BINARY@</string>
+        <string>daemon</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>@LOGFILE@</string>
+    <key>StandardErrorPath</key>
+    <string>@LOGFILE@</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ORT_DYLIB_PATH</key>
+        <string>@ORT_DYLIB_PATH@</string>
+    </dict>
+</dict>
+</plist>

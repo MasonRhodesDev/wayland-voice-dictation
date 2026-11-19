@@ -8,7 +8,8 @@ pub mod wezterm;
 pub use connection::{AtspiConnection, MockTextChangeSource, TextChangeSource};
 pub use store::CorrectionStore;
 pub use types::{
-    CorrectionPair, CorrectionStats, InjectionContext, MonitorConfig, TextChangeEvent,
+    CorrectionPair, CorrectionStats, EventScope, EventSource, InjectionContext, MonitorConfig,
+    TextChangeEvent,
 };
 pub use wezterm::{WeztermMonitor, WEZTERM_WINDOW_CLASS};
 
@@ -25,13 +26,6 @@ pub struct CorrectionMonitor {
 }
 
 impl CorrectionMonitor {
-    pub async fn new(config: MonitorConfig) -> Result<Self> {
-        let connection = AtspiConnection::connect().await;
-        let store = CorrectionStore::load(&config)?;
-
-        Ok(Self { source: Arc::new(connection), store: Arc::new(Mutex::new(store)), config })
-    }
-
     pub fn with_source(
         source: Arc<dyn TextChangeSource>,
         store: CorrectionStore,
@@ -70,7 +64,7 @@ impl CorrectionMonitor {
             return Ok(Vec::new());
         }
 
-        let mut rx = source.subscribe().await?;
+        let mut rx = source.subscribe(&context).await?;
         let monitor_duration = Duration::from_secs(config.monitor_duration_secs);
 
         info!(
@@ -92,7 +86,7 @@ impl CorrectionMonitor {
                 Ok(Some(event)) => {
                     debug!(
                         "AT-SPI2 event: {:?} at pos {} text='{}' from '{}'",
-                        event.operation, event.start_pos, event.text, event.source_app
+                        event.operation, event.start_pos, event.text, event.source
                     );
                     events.push(event);
                 }
@@ -114,14 +108,21 @@ impl CorrectionMonitor {
 
         info!("Monitoring window summary: {}", summarize_events(&events));
 
-        let filtered = event_filter::filter_events(&events, &context, &config);
+        let scope = source.event_scope();
+        let filtered = match scope {
+            EventScope::Field => event_filter::filter_field_events(&events, &context, &config),
+            EventScope::DictatedText => event_filter::filter_events(&events, &context, &config),
+        };
         debug!("After filtering: {} of {} events are relevant", filtered.len(), events.len());
 
         if filtered.is_empty() {
             return Ok(Vec::new());
         }
 
-        let corrections = diff::extract_corrections(&context, &filtered);
+        let corrections = match scope {
+            EventScope::Field => diff::extract_field_corrections(&context, &filtered),
+            EventScope::DictatedText => diff::extract_corrections(&context, &filtered),
+        };
 
         if corrections.is_empty() {
             debug!("No corrections extracted from events");
@@ -165,10 +166,10 @@ impl CorrectionMonitor {
 }
 
 fn summarize_events(events: &[TextChangeEvent]) -> String {
-    let mut per_app: std::collections::BTreeMap<&str, (usize, usize)> =
+    let mut per_app: std::collections::BTreeMap<&EventSource, (usize, usize)> =
         std::collections::BTreeMap::new();
     for event in events {
-        let entry = per_app.entry(event.source_app.as_str()).or_insert((0, 0));
+        let entry = per_app.entry(&event.source).or_insert((0, 0));
         match event.operation {
             types::TextChangeOp::Insert => entry.0 += 1,
             types::TextChangeOp::Delete => entry.1 += 1,
@@ -196,7 +197,7 @@ mod tests {
             length: 1,
             text: "x".to_string(),
             timestamp: Instant::now(),
-            source_app: source_app.to_string(),
+            source: EventSource::App(source_app.to_string()),
         }
     }
 

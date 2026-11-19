@@ -6,7 +6,7 @@ pub struct IdleInhibitor {
     _inhibit: logind_session::Inhibitor,
 }
 
-pub async fn acquire(reason: &str) -> Result<IdleInhibitor> {
+pub async fn inhibit_idle(reason: &str) -> Result<IdleInhibitor> {
     let conn = Connection::system().await?;
     let proxy = logind_session::LogindManagerProxy::new(&conn).await?;
     let inhibit = logind_session::Inhibitor::acquire(

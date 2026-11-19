@@ -2,9 +2,44 @@ use crate::types::{
     CorrectionPair, InjectionContext, ReplacementEvent, TextChangeEvent, TextChangeOp,
 };
 use chrono::Utc;
+use std::ops::Range;
 use std::time::Duration;
 
 const REPLACEMENT_GAP: Duration = Duration::from_secs(2);
+
+pub struct DictatedSpan(Option<Range<usize>>);
+
+impl DictatedSpan {
+    pub fn new(range: Range<usize>) -> Self {
+        Self(Some(range))
+    }
+
+    pub fn is_tracking(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub fn edit(&mut self, start: usize, deleted: usize, inserted: usize) -> Option<usize> {
+        let span = self.0.take()?;
+        let end = start + deleted;
+
+        if end <= span.start {
+            self.0 = Some(span.start - deleted + inserted..span.end - deleted + inserted);
+            return None;
+        }
+        if start >= span.end {
+            self.0 = Some(span);
+            return None;
+        }
+        let inside = start >= span.start && end <= span.end;
+        let whole = start == span.start && end == span.end;
+        if !inside || whole {
+            return None;
+        }
+
+        self.0 = Some(span.start..span.end - deleted + inserted);
+        Some(start - span.start)
+    }
+}
 
 pub fn group_replacement_events(events: &[TextChangeEvent]) -> Vec<ReplacementEvent> {
     let mut replacements = Vec::new();
@@ -59,15 +94,48 @@ pub fn extract_corrections(
     context: &InjectionContext,
     events: &[TextChangeEvent],
 ) -> Vec<CorrectionPair> {
-    if context.text.is_empty() || events.is_empty() {
+    correction_pairs(context, &group_replacement_events(events))
+}
+
+pub fn extract_field_corrections(
+    context: &InjectionContext,
+    events: &[TextChangeEvent],
+) -> Vec<CorrectionPair> {
+    let mut span = DictatedSpan::new(0..context.text.chars().count());
+    let mut edits = Vec::new();
+
+    for replacement in group_replacement_events(events) {
+        let Ok(start) = usize::try_from(replacement.position) else {
+            continue;
+        };
+        let offset = span.edit(
+            start,
+            replacement.deleted_text.chars().count(),
+            replacement.inserted_text.chars().count(),
+        );
+        if !span.is_tracking() {
+            break;
+        }
+        if let Some(offset) = offset {
+            edits.push(ReplacementEvent { position: offset as i32, ..replacement });
+        }
+    }
+
+    correction_pairs(context, &edits)
+}
+
+fn correction_pairs(
+    context: &InjectionContext,
+    replacements: &[ReplacementEvent],
+) -> Vec<CorrectionPair> {
+    if context.text.is_empty() {
         return Vec::new();
     }
 
     let injection_len = context.text.chars().count() as i32;
-    let replacements = group_replacement_events(events);
     let mut corrections = Vec::new();
 
-    for replacement in &replacements {
+    for replacement in replacements {
         if replacement.position < 0 || replacement.position > injection_len {
             continue;
         }
@@ -166,6 +234,7 @@ fn extract_context_after(text: &str, pos: i32, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::EventSource;
     use std::time::Instant;
 
     fn make_event(op: TextChangeOp, pos: i32, text: &str, offset: Duration) -> TextChangeEvent {
@@ -176,7 +245,7 @@ mod tests {
             length: text.chars().count() as i32,
             text: text.to_string(),
             timestamp: base + offset,
-            source_app: "test-app".to_string(),
+            source: EventSource::App("test-app".to_string()),
         }
     }
 
@@ -186,6 +255,7 @@ mod tests {
             timestamp: Utc::now(),
             instant: Instant::now(),
             window_class: "test-app".to_string(),
+            window_pid: None,
             window_title: "Test Window".to_string(),
         }
     }
@@ -200,7 +270,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test".to_string(),
+                source: EventSource::App("test".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -208,7 +278,7 @@ mod tests {
                 length: 5,
                 text: "earth".to_string(),
                 timestamp: base + Duration::from_millis(100),
-                source_app: "test".to_string(),
+                source: EventSource::App("test".to_string()),
             },
         ];
 
@@ -249,7 +319,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test".to_string(),
+                source: EventSource::App("test".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -257,7 +327,7 @@ mod tests {
                 length: 5,
                 text: "earth".to_string(),
                 timestamp: base + Duration::from_secs(5),
-                source_app: "test".to_string(),
+                source: EventSource::App("test".to_string()),
             },
         ];
 
@@ -280,7 +350,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -288,7 +358,7 @@ mod tests {
                 length: 5,
                 text: "earth".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -309,7 +379,7 @@ mod tests {
                 length: 4,
                 text: "cash".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -317,7 +387,7 @@ mod tests {
                 length: 5,
                 text: "cache".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -378,7 +448,7 @@ mod tests {
                 length: 4,
                 text: "cash".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -386,7 +456,7 @@ mod tests {
                 length: 5,
                 text: "cache".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Delete,
@@ -394,7 +464,7 @@ mod tests {
                 length: 4,
                 text: "hear".to_string(),
                 timestamp: base + Duration::from_secs(3),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -402,7 +472,7 @@ mod tests {
                 length: 4,
                 text: "here".to_string(),
                 timestamp: base + Duration::from_millis(3050),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -425,7 +495,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -433,7 +503,7 @@ mod tests {
                 length: 5,
                 text: "earth".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -463,7 +533,7 @@ mod tests {
                 length: 3,
                 text: "foo".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -471,7 +541,7 @@ mod tests {
                 length: 3,
                 text: "bar".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -490,7 +560,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -498,7 +568,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 

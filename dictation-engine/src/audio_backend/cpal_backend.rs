@@ -8,6 +8,72 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use super::{AudioBackend, AudioBackendConfig, AudioBackendFactory, DeviceInfo};
+use crate::resample::Resampler;
+
+struct Conversion {
+    channels: usize,
+    resampler: Resampler,
+}
+
+impl Conversion {
+    fn new(channels: u16, in_rate: u32, out_rate: u32) -> Self {
+        Self {
+            channels: usize::from(channels.max(1)),
+            resampler: Resampler::new(in_rate, out_rate),
+        }
+    }
+
+    fn apply(&mut self, interleaved: &[f32]) -> Vec<i16> {
+        let mono: Vec<i16> = interleaved
+            .chunks(self.channels)
+            .map(|frame| {
+                let sample = frame.iter().sum::<f32>() / frame.len() as f32;
+                (sample * 32767.0).clamp(-32768.0, 32767.0) as i16
+            })
+            .collect();
+        self.resampler.push(&mono)
+    }
+}
+
+fn capture_format(device: &cpal::Device, target_rate: u32) -> (StreamConfig, Conversion) {
+    let requested = StreamConfig {
+        channels: 1,
+        sample_rate: cpal::SampleRate(target_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let supports_requested = device
+        .supported_input_configs()
+        .map(|mut configs| {
+            configs.any(|c| {
+                c.channels() == 1
+                    && c.sample_format() == cpal::SampleFormat::F32
+                    && (c.min_sample_rate().0..=c.max_sample_rate().0).contains(&target_rate)
+            })
+        })
+        .unwrap_or(true);
+    if supports_requested {
+        return (requested, Conversion::new(1, target_rate, target_rate));
+    }
+    match device.default_input_config() {
+        Ok(default) => {
+            let native = StreamConfig {
+                channels: default.channels(),
+                sample_rate: default.sample_rate(),
+                buffer_size: cpal::BufferSize::Default,
+            };
+            info!(
+                "Device has no mono {} Hz input; capturing {} ch at {} Hz and converting",
+                target_rate, native.channels, native.sample_rate.0
+            );
+            let conversion = Conversion::new(native.channels, native.sample_rate.0, target_rate);
+            (native, conversion)
+        }
+        Err(e) => {
+            warn!("Could not read the device's default input config: {}", e);
+            (requested, Conversion::new(1, target_rate, target_rate))
+        }
+    }
+}
 
 pub struct CpalBackend {
     streams: Vec<Stream>,
@@ -74,11 +140,7 @@ impl CpalBackend {
 
         let (cb_tx, cb_rx) = crossbeam_channel::bounded::<Vec<i16>>(100);
 
-        let stream_config = StreamConfig {
-            channels: 1,
-            sample_rate: cpal::SampleRate(config.sample_rate),
-            buffer_size: cpal::BufferSize::Default,
-        };
+        let (stream_config, mut conversion) = capture_format(&device, config.sample_rate);
 
         let errored_streams: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let last_audio_timestamp = Arc::new(AtomicU64::new(0));
@@ -101,10 +163,10 @@ impl CpalBackend {
                         return;
                     }
 
-                    let samples: Vec<i16> = data
-                        .iter()
-                        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-                        .collect();
+                    let samples = conversion.apply(data);
+                    if samples.is_empty() {
+                        return;
+                    }
 
                     if cb_tx.try_send(samples).is_err() {
                         samples_dropped_clone.fetch_add(1, Ordering::Relaxed);
@@ -125,6 +187,7 @@ impl CpalBackend {
             .map_err(|e| {
                 anyhow::anyhow!("Failed to create audio stream for '{}': {}", stream_id, e)
             })?;
+        stream.pause()?;
 
         info!("Created audio stream for: {}", stream_id);
 
@@ -227,5 +290,34 @@ impl AudioBackendFactory for CpalBackend {
         }
 
         Ok(devices)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_at_the_target_rate_passes_through_unchanged() {
+        let mut conversion = Conversion::new(1, 16_000, 16_000);
+        assert_eq!(
+            conversion.apply(&[0.0, 0.5, -0.5, 1.0, -1.0]),
+            vec![0, 16383, -16383, 32767, -32767]
+        );
+    }
+
+    #[test]
+    fn stereo_48k_becomes_mono_16k() {
+        let frames = 4_800;
+        let interleaved: Vec<f32> = (0..frames)
+            .flat_map(|i| {
+                let left = (i % 100) as f32 / 100.0;
+                [left, -left + 0.5]
+            })
+            .collect();
+        let mut conversion = Conversion::new(2, 48_000, 16_000);
+        let out: Vec<i16> = interleaved.chunks(960).flat_map(|c| conversion.apply(c)).collect();
+        assert!((out.len() as i64 - 1_600).abs() <= 2, "got {}", out.len());
+        assert!(out.iter().all(|&s| s == 8191), "each frame averages to 0.25");
     }
 }

@@ -1,5 +1,5 @@
 use correction_engine::connection::{AtspiConnection, TextChangeSource};
-use correction_engine::types::{TextChangeEvent, TextChangeOp};
+use correction_engine::types::{EventSource, InjectionContext, TextChangeEvent, TextChangeOp};
 use std::path::Path;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
@@ -7,6 +7,7 @@ use tokio::time::{sleep, timeout};
 const SUBSCRIBED_MARKER: &str = "/tmp/e2e-subscribed";
 const READY_MARKER: &str = "/tmp/e2e-ready";
 const TRIGGER_MARKER: &str = "/tmp/e2e-do-edit";
+const APP_PID_FILE: &str = "/tmp/test-app.pid";
 
 async fn wait_for_marker(path: &str, deadline: Duration) -> bool {
     let start = std::time::Instant::now();
@@ -88,7 +89,15 @@ async fn atspi_receives_real_text_change_events() {
         "AT-SPI2 bus reported unavailable inside the e2e container; \
          dbus/at-spi2-registryd wiring is broken"
     );
-    let mut rx = conn.subscribe().await.expect("subscribe() failed");
+    let context = InjectionContext {
+        text: String::new(),
+        timestamp: chrono::Utc::now(),
+        instant: std::time::Instant::now(),
+        window_class: String::new(),
+        window_pid: None,
+        window_title: String::new(),
+    };
+    let mut rx = conn.subscribe(&context).await.expect("subscribe() failed");
 
     sleep(Duration::from_millis(500)).await;
     std::fs::write(SUBSCRIBED_MARKER, b"subscribed\n").expect("failed to write subscribed marker");
@@ -106,6 +115,7 @@ async fn atspi_receives_real_text_change_events() {
     let mut events: Vec<TextChangeEvent> = Vec::new();
     let mut saw_insert_cache = false;
     let mut saw_delete_cash = false;
+    let mut cache_insert_source = None;
 
     let overall = timeout(Duration::from_secs(15), async {
         loop {
@@ -113,6 +123,7 @@ async fn atspi_receives_real_text_change_events() {
                 Ok(Some(ev)) => {
                     if ev.operation == TextChangeOp::Insert && ev.text.contains("cache") {
                         saw_insert_cache = true;
+                        cache_insert_source = Some(ev.source.clone());
                     }
                     if ev.operation == TextChangeOp::Delete && ev.text.contains("cash") {
                         saw_delete_cash = true;
@@ -136,7 +147,7 @@ async fn atspi_receives_real_text_change_events() {
             .map(|e| {
                 format!(
                     "  {:?} start={} len={} text={:?} app={:?}",
-                    e.operation, e.start_pos, e.length, e.text, e.source_app
+                    e.operation, e.start_pos, e.length, e.text, e.source
                 )
             })
             .collect::<Vec<_>>()
@@ -157,6 +168,18 @@ async fn atspi_receives_real_text_change_events() {
          (the correction). overall_deadline_hit={}\nEvents:\n{}",
         events.len(),
         overall.is_err(),
+        dump()
+    );
+
+    let app_pid: u32 = std::fs::read_to_string(APP_PID_FILE)
+        .expect("GTK4 test app never wrote its pid")
+        .trim()
+        .parse()
+        .expect("test app pid is not a number");
+    assert_eq!(
+        cache_insert_source,
+        Some(EventSource::Process(app_pid)),
+        "the correction must be attributed to the process that owns the edited window\nEvents:\n{}",
         dump()
     );
 

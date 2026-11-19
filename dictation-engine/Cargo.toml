@@ -9,7 +9,7 @@ license.workspace = true
 default = ["pipewire", "tray", "correction"]
 pipewire = ["dep:pipewire"]
 tray = ["dep:ksni"]
-correction = ["dep:correction-engine"]
+correction = ["dep:correction-engine", "dep:async-trait"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -19,17 +19,12 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-slint-gui = { path = "../slint-gui" }
 dictation-types = { path = "../dictation-types" }
 shellexpand = "3"
 cpal = "0.15"
 toml = "0.8"
 harper-core = "0.68"
-zbus = "5"
-systemd = "0.10"
 dirs = "5"
-xdg-paths = "0.2.0"
-logind-session = "0.2.0"
 notify = "6"
 hound = "3.5"
 strsim = "0.11"
@@ -46,17 +41,38 @@ hmac = "0.12"
 tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "multipart", "rustls-tls"] }
-pipewire = { version = "0.10", optional = true }
-ksni = { git = "https://github.com/iovxw/ksni.git", rev = "4d2320c", optional = true }
 futures-util = "0.3"
+libc = "0.2"
 correction-engine = { path = "../correction-engine", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+slint-gui = { path = "../slint-gui" }
+zbus = "5"
+systemd = "0.10"
+logind-session = "0.2.0"
+xdg-paths = "0.2.0"
 wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
-libc = "0.2"
+pipewire = { version = "0.10", optional = true }
+ksni = { git = "https://github.com/iovxw/ksni.git", rev = "4d2320c", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+slint-gui = { path = "../slint-gui" }
+core-foundation = "0.9"
+core-graphics = "0.23"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "objc2-core-foundation", "NSApplication", "NSButton", "NSCell", "NSControl", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWorkspace"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
+block2 = "0.6"
+async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false }
 tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "5", features = ["p2p", "tokio"] }
 
 [lib]
 name = "dictation_engine"

@@ -5,13 +5,12 @@ use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 use crate::audio_backend::BackendType;
-use crate::dbus_control::{DaemonCommand, DaemonState};
+use crate::control::{DaemonCommand, DaemonState};
+use crate::platform::tray_menu::{TrayAction, TrayEntry, TrayModel};
 
 pub struct DictationTray {
-    state: DaemonState,
+    model: TrayModel,
     command_tx: mpsc::Sender<DaemonCommand>,
-    cached_devices: Vec<crate::audio_backend::DeviceInfo>,
-    selected_device: Option<String>,
     icon_invalidated: bool,
 }
 
@@ -32,7 +31,7 @@ impl Tray for DictationTray {
         if self.icon_invalidated {
             return "content-loading-symbolic".into();
         }
-        match self.state {
+        match self.model.state {
             DaemonState::Idle => "microphone-sensitivity-muted-symbolic",
             DaemonState::Recording => "microphone-sensitivity-high-symbolic",
             DaemonState::Processing => "content-loading-symbolic",
@@ -45,7 +44,7 @@ impl Tray for DictationTray {
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
-        let description = match self.state {
+        let description = match self.model.state {
             DaemonState::Idle => "Idle - click to start recording",
             DaemonState::Recording => "Recording - click to confirm",
             DaemonState::Processing => "Processing transcription...",
@@ -59,131 +58,51 @@ impl Tray for DictationTray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        let cmd = match self.state {
-            DaemonState::Idle => DaemonCommand::StartRecording,
-            DaemonState::Recording => DaemonCommand::Confirm,
-            DaemonState::Processing => return,
-        };
-        if let Err(e) = self.command_tx.try_send(cmd) {
-            warn!("Tray activate: failed to send command: {e}");
-        }
+        self.model.activate(&self.command_tx);
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let is_idle = self.state == DaemonState::Idle;
-        let is_recording = self.state == DaemonState::Recording;
-
-        let devices = &self.cached_devices;
-
-        let mut device_names: Vec<Option<String>> = vec![None];
-        for dev in devices {
-            device_names.push(Some(dev.name.clone()));
-        }
-
-        let selected_idx = match &self.selected_device {
-            None => 0,
-            Some(name) => device_names.iter().position(|d| d.as_deref() == Some(name)).unwrap_or(0),
-        };
-
-        let mut radio_options = vec![RadioItem { label: "Default".into(), ..Default::default() }];
-        for dev in devices {
-            radio_options.push(RadioItem { label: dev.description.clone(), ..Default::default() });
-        }
-
-        info!(
-            "Tray menu: {} cached devices, {} radio options, selected_idx={}",
-            devices.len(),
-            radio_options.len(),
-            selected_idx
-        );
-
-        let device_submenu = SubMenu {
-            label: "Input Device".into(),
-            submenu: vec![RadioGroup {
-                selected: selected_idx,
-                select: Box::new(move |tray: &mut Self, index: usize| {
-                    let new_device = if index == 0 {
-                        None
-                    } else {
-                        tray.cached_devices.get(index - 1).map(|d| d.name.clone())
-                    };
-                    info!("Tray: Selected device {:?}", new_device.as_deref().unwrap_or("Default"));
-                    tray.selected_device = new_device.clone();
-                    if let Err(e) =
-                        tray.command_tx.try_send(DaemonCommand::SwitchDevice(new_device))
-                    {
-                        warn!("Tray: failed to send SwitchDevice: {e}");
+        self.model
+            .entries()
+            .into_iter()
+            .map(|entry| match entry {
+                TrayEntry::Item { label, enabled, action } => StandardItem {
+                    label: label.into(),
+                    enabled,
+                    activate: Box::new(move |tray: &mut Self| {
+                        tray.model.perform(action.clone(), &tray.command_tx)
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                TrayEntry::Devices { label, options, selected } => {
+                    info!(
+                        "Tray menu: {} cached devices, {} radio options, selected_idx={}",
+                        self.model.devices.len(),
+                        options.len(),
+                        selected
+                    );
+                    SubMenu {
+                        label: label.into(),
+                        submenu: vec![RadioGroup {
+                            selected,
+                            select: Box::new(|tray: &mut Self, index: usize| {
+                                tray.model
+                                    .perform(TrayAction::SelectDevice(index), &tray.command_tx)
+                            }),
+                            options: options
+                                .into_iter()
+                                .map(|label| RadioItem { label, ..Default::default() })
+                                .collect(),
+                        }
+                        .into()],
+                        ..Default::default()
                     }
-                }),
-                options: radio_options,
-            }
-            .into()],
-            ..Default::default()
-        };
-
-        vec![
-            StandardItem {
-                label: if is_idle { "Start Recording".into() } else { "Confirm".into() },
-                enabled: !matches!(self.state, DaemonState::Processing),
-                activate: Box::new(move |tray: &mut Self| {
-                    let cmd = if is_idle {
-                        DaemonCommand::StartRecording
-                    } else {
-                        DaemonCommand::Confirm
-                    };
-                    if let Err(e) = tray.command_tx.try_send(cmd) {
-                        warn!("Tray menu: failed to send command: {e}");
-                    }
-                }),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: "Cancel".into(),
-                enabled: is_recording,
-                activate: Box::new(|tray: &mut Self| {
-                    if let Err(e) = tray.command_tx.try_send(DaemonCommand::StopRecording) {
-                        warn!("Tray: failed to send StopRecording: {e}");
-                    }
-                }),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            device_submenu.into(),
-            MenuItem::Separator,
-            StandardItem {
-                label: "Open Test Loop".into(),
-                activate: Box::new(|_tray: &mut Self| {
-                    if let Ok(exe) = std::env::current_exe() {
-                        let _ = std::process::Command::new(exe).arg("test-loop").spawn();
-                    }
-                }),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            StandardItem {
-                label: "Restart Daemon".into(),
-                activate: Box::new(|tray: &mut Self| {
-                    if let Err(e) = tray.command_tx.try_send(DaemonCommand::Restart) {
-                        warn!("Tray: failed to send Restart: {e}");
-                    }
-                }),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: "Quit".into(),
-                activate: Box::new(|tray: &mut Self| {
-                    if let Err(e) = tray.command_tx.try_send(DaemonCommand::Shutdown) {
-                        warn!("Tray: failed to send Shutdown: {e}");
-                    }
-                }),
-                ..Default::default()
-            }
-            .into(),
-        ]
+                    .into()
+                }
+                TrayEntry::Separator => MenuItem::Separator,
+            })
+            .collect()
     }
 
     fn watcher_offline(&self, _reason: ksni::OfflineReason) -> bool {
@@ -197,8 +116,8 @@ pub fn spawn_tray(
     command_tx: mpsc::Sender<DaemonCommand>,
     backend_type: BackendType,
     initial_device: Option<String>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+) -> Option<tokio::task::JoinHandle<()>> {
+    Some(tokio::spawn(async move {
         let mut backoff = std::time::Duration::from_secs(5);
         let max_backoff = std::time::Duration::from_secs(30);
 
@@ -207,10 +126,12 @@ pub fn spawn_tray(
                 crate::audio_backend::list_devices(backend_type).unwrap_or_default();
 
             let tray = DictationTray {
-                state: *state_rx.borrow(),
+                model: TrayModel {
+                    state: *state_rx.borrow(),
+                    devices: initial_devices,
+                    selected_device: initial_device.clone(),
+                },
                 command_tx: command_tx.clone(),
-                cached_devices: initial_devices,
-                selected_device: initial_device.clone(),
                 icon_invalidated: false,
             };
 
@@ -237,7 +158,7 @@ pub fn spawn_tray(
                 }
             }
         }
-    })
+    }))
 }
 
 async fn run_tray_update_loop(
@@ -260,10 +181,10 @@ async fn run_tray_update_loop(
                 let bt = backend_type;
                 if handle
                     .update(move |tray| {
-                        tray.state = new_state;
+                        tray.model.state = new_state;
                         if refresh {
                             if let Ok(devs) = crate::audio_backend::list_devices(bt) {
-                                tray.cached_devices = devs;
+                                tray.model.devices = devs;
                             }
                         }
                     })
@@ -278,7 +199,7 @@ async fn run_tray_update_loop(
                 if handle
                     .update(move |tray| {
                         if let Ok(devs) = crate::audio_backend::list_devices(bt) {
-                            tray.cached_devices = devs;
+                            tray.model.devices = devs;
                         }
                     })
                     .await
