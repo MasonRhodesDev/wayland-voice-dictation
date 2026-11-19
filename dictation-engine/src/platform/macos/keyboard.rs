@@ -10,18 +10,13 @@ use crate::platform::utf16::utf16_chunks;
 const MAX_UTF16_PER_EVENT: usize = 20;
 const CHUNK_DELAY: Duration = Duration::from_millis(5);
 
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGPreflightPostEventAccess() -> bool;
-}
-
 pub async fn type_text_with_progress(
     text: &str,
     word_delay_ms: u64,
     mut on_progress: impl FnMut(usize, usize),
 ) -> Result<()> {
     debug!("Typing text: {}", text);
-    if !unsafe { CGPreflightPostEventAccess() } {
+    if !super::permissions::can_post_events() {
         return Err(anyhow!("{}", super::permissions::accessibility()));
     }
 
