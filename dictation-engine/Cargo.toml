@@ -63,8 +63,7 @@ core-graphics = "0.23"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "objc2-core-foundation", "NSApplication", "NSButton", "NSCell", "NSControl", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
-objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
-block2 = "0.6"
+rust-platform-kit = { git = "https://github.com/MasonRhodesDev/rust-platform-kit", tag = "v0.1.0", default-features = false, features = ["permissions"] }
 async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
