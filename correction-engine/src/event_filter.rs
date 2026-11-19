@@ -54,7 +54,10 @@ fn filter_app_events(
 
 fn from_dictated_app(source: &EventSource, context: &InjectionContext) -> bool {
     match source {
-        EventSource::Process(pid) => context.window_pid.is_none_or(|focused| focused == *pid),
+        EventSource::Process(pid) => match context.window_pid {
+            Some(focused) => focused == *pid,
+            None => context.window_class.is_empty(),
+        },
         EventSource::App(app) => {
             let source_lower = app.to_lowercase();
             let target_lower = context.window_class.to_lowercase();

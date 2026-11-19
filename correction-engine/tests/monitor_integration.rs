@@ -262,6 +262,26 @@ async fn an_edit_in_another_application_records_nothing() {
 }
 
 #[tokio::test]
+async fn an_edit_records_nothing_when_the_focused_window_has_no_process_id() {
+    let dir = TempDir::new().unwrap();
+    let config = make_config(dir.path(), 1, 3);
+    let context = InjectionContext { window_pid: None, ..atspi_context("the cash is here") };
+
+    let (pairs, stats) = learn(
+        &config,
+        context,
+        vec![
+            atspi_event(TextChangeOp::Delete, 4, "cash"),
+            atspi_event(TextChangeOp::Insert, 4, "cache"),
+        ],
+    )
+    .await;
+
+    assert_eq!(pairs, []);
+    assert_eq!(stats.total_corrections, 0);
+}
+
+#[tokio::test]
 async fn a_fix_is_recorded_when_the_focused_window_is_unknown() {
     let dir = TempDir::new().unwrap();
     let config = make_config(dir.path(), 1, 3);
