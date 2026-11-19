@@ -1,8 +1,10 @@
-use crate::types::{EventScope, InjectionContext, TextChangeEvent, TextChangeOp};
+use crate::types::{EventScope, EventSource, InjectionContext, TextChangeEvent, TextChangeOp};
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+use zbus::names::UniqueName;
 
 #[allow(clippy::double_must_use)]
 #[async_trait]
@@ -80,6 +82,7 @@ async fn run_event_listener(tx: mpsc::Sender<TextChangeEvent>) -> Result<()> {
 
     atspi.register_event::<TextChangedEvent>().await?;
     debug!("Registered for AT-SPI2 TextChangedEvent");
+    let mut senders = SenderPids::on_own_connection().await?;
 
     let events = atspi.event_stream();
     tokio::pin!(events);
@@ -102,15 +105,23 @@ async fn run_event_listener(tx: mpsc::Sender<TextChangeEvent>) -> Result<()> {
             atspi::Operation::Delete => TextChangeOp::Delete,
         };
 
-        let source_app = text_event.item.name_as_str().unwrap_or("").to_string();
+        let timestamp = std::time::Instant::now();
+        let pid = match text_event.item.name() {
+            Some(sender) => senders.pid_of(sender).await,
+            None => None,
+        };
+        let Some(pid) = pid else {
+            debug!("Dropping AT-SPI2 event from a sender with no known process id");
+            continue;
+        };
 
         let event = TextChangeEvent {
             operation,
             start_pos: text_event.start_pos,
             length: text_event.length,
             text: text_event.text,
-            timestamp: std::time::Instant::now(),
-            source_app,
+            timestamp,
+            source: EventSource::Process(pid),
         };
 
         if tx.send(event).await.is_err() {
@@ -120,6 +131,28 @@ async fn run_event_listener(tx: mpsc::Sender<TextChangeEvent>) -> Result<()> {
     }
 
     Ok(())
+}
+
+struct SenderPids {
+    bus: zbus::fdo::DBusProxy<'static>,
+    known: HashMap<String, Option<u32>>,
+}
+
+impl SenderPids {
+    async fn on_own_connection() -> Result<Self> {
+        let atspi = atspi::AccessibilityConnection::new().await?;
+        let bus = zbus::fdo::DBusProxy::new(atspi.connection()).await?;
+        Ok(Self { bus, known: HashMap::new() })
+    }
+
+    async fn pid_of(&mut self, sender: &UniqueName<'_>) -> Option<u32> {
+        if let Some(pid) = self.known.get(sender.as_str()) {
+            return *pid;
+        }
+        let pid = self.bus.get_connection_unix_process_id(sender.clone().into()).await.ok();
+        self.known.insert(sender.to_string(), pid);
+        pid
+    }
 }
 
 pub struct MockTextChangeSource {

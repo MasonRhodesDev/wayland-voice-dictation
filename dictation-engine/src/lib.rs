@@ -1454,6 +1454,7 @@ async fn daemon() -> Result<()> {
                     corrections.record_injection(
                         &sanitized_result,
                         focus_target.as_ref().map(|t| t.class()).unwrap_or_default(),
+                        focus_target.as_ref().and_then(|t| t.pid()),
                     );
 
                     let _ = gui_control_tx.send(GuiControl::SetClosing);

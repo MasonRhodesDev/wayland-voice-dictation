@@ -234,6 +234,7 @@ fn extract_context_after(text: &str, pos: i32, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::EventSource;
     use std::time::Instant;
 
     fn make_event(op: TextChangeOp, pos: i32, text: &str, offset: Duration) -> TextChangeEvent {
@@ -244,7 +245,7 @@ mod tests {
             length: text.chars().count() as i32,
             text: text.to_string(),
             timestamp: base + offset,
-            source_app: "test-app".to_string(),
+            source: EventSource::App("test-app".to_string()),
         }
     }
 
@@ -254,6 +255,7 @@ mod tests {
             timestamp: Utc::now(),
             instant: Instant::now(),
             window_class: "test-app".to_string(),
+            window_pid: None,
             window_title: "Test Window".to_string(),
         }
     }
@@ -268,7 +270,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test".to_string(),
+                source: EventSource::App("test".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -276,7 +278,7 @@ mod tests {
                 length: 5,
                 text: "earth".to_string(),
                 timestamp: base + Duration::from_millis(100),
-                source_app: "test".to_string(),
+                source: EventSource::App("test".to_string()),
             },
         ];
 
@@ -317,7 +319,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test".to_string(),
+                source: EventSource::App("test".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -325,7 +327,7 @@ mod tests {
                 length: 5,
                 text: "earth".to_string(),
                 timestamp: base + Duration::from_secs(5),
-                source_app: "test".to_string(),
+                source: EventSource::App("test".to_string()),
             },
         ];
 
@@ -348,7 +350,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -356,7 +358,7 @@ mod tests {
                 length: 5,
                 text: "earth".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -377,7 +379,7 @@ mod tests {
                 length: 4,
                 text: "cash".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -385,7 +387,7 @@ mod tests {
                 length: 5,
                 text: "cache".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -446,7 +448,7 @@ mod tests {
                 length: 4,
                 text: "cash".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -454,7 +456,7 @@ mod tests {
                 length: 5,
                 text: "cache".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Delete,
@@ -462,7 +464,7 @@ mod tests {
                 length: 4,
                 text: "hear".to_string(),
                 timestamp: base + Duration::from_secs(3),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -470,7 +472,7 @@ mod tests {
                 length: 4,
                 text: "here".to_string(),
                 timestamp: base + Duration::from_millis(3050),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -493,7 +495,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -501,7 +503,7 @@ mod tests {
                 length: 5,
                 text: "earth".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -531,7 +533,7 @@ mod tests {
                 length: 3,
                 text: "foo".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -539,7 +541,7 @@ mod tests {
                 length: 3,
                 text: "bar".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 
@@ -558,7 +560,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base,
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
             TextChangeEvent {
                 operation: TextChangeOp::Insert,
@@ -566,7 +568,7 @@ mod tests {
                 length: 5,
                 text: "world".to_string(),
                 timestamp: base + Duration::from_millis(50),
-                source_app: "test-app".to_string(),
+                source: EventSource::App("test-app".to_string()),
             },
         ];
 

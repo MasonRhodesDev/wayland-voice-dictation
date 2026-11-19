@@ -102,12 +102,13 @@ impl CorrectionLearning {
         }
     }
 
-    pub fn record_injection(&mut self, text: &str, window_class: &str) {
+    pub fn record_injection(&mut self, text: &str, window_class: &str, window_pid: Option<u32>) {
         let context = InjectionContext {
             text: text.to_string(),
             timestamp: chrono::Utc::now(),
             instant: Instant::now(),
             window_class: window_class.to_string(),
+            window_pid,
             window_title: String::new(),
         };
         self.last_injection = Some(context.clone());
