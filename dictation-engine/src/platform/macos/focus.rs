@@ -44,4 +44,8 @@ impl FocusTarget {
     pub fn class(&self) -> &str {
         &self.class
     }
+
+    pub fn pid(&self) -> Option<u32> {
+        u32::try_from(self.pid).ok()
+    }
 }

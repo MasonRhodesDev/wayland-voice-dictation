@@ -8,7 +8,8 @@ pub mod wezterm;
 pub use connection::{AtspiConnection, MockTextChangeSource, TextChangeSource};
 pub use store::CorrectionStore;
 pub use types::{
-    CorrectionPair, CorrectionStats, EventScope, InjectionContext, MonitorConfig, TextChangeEvent,
+    CorrectionPair, CorrectionStats, EventScope, EventSource, InjectionContext, MonitorConfig,
+    TextChangeEvent,
 };
 pub use wezterm::{WeztermMonitor, WEZTERM_WINDOW_CLASS};
 
@@ -85,7 +86,7 @@ impl CorrectionMonitor {
                 Ok(Some(event)) => {
                     debug!(
                         "AT-SPI2 event: {:?} at pos {} text='{}' from '{}'",
-                        event.operation, event.start_pos, event.text, event.source_app
+                        event.operation, event.start_pos, event.text, event.source
                     );
                     events.push(event);
                 }
@@ -165,10 +166,10 @@ impl CorrectionMonitor {
 }
 
 fn summarize_events(events: &[TextChangeEvent]) -> String {
-    let mut per_app: std::collections::BTreeMap<&str, (usize, usize)> =
+    let mut per_app: std::collections::BTreeMap<&EventSource, (usize, usize)> =
         std::collections::BTreeMap::new();
     for event in events {
-        let entry = per_app.entry(event.source_app.as_str()).or_insert((0, 0));
+        let entry = per_app.entry(&event.source).or_insert((0, 0));
         match event.operation {
             types::TextChangeOp::Insert => entry.0 += 1,
             types::TextChangeOp::Delete => entry.1 += 1,
@@ -196,7 +197,7 @@ mod tests {
             length: 1,
             text: "x".to_string(),
             timestamp: Instant::now(),
-            source_app: source_app.to_string(),
+            source: EventSource::App(source_app.to_string()),
         }
     }
 

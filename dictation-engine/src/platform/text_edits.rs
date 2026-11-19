@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use correction_engine::diff::DictatedSpan;
-use correction_engine::types::TextChangeOp;
+use correction_engine::types::{EventSource, TextChangeOp};
 use correction_engine::TextChangeEvent;
 
 const SETTLE: Duration = Duration::from_secs(1);
@@ -82,7 +82,7 @@ impl EditTracker {
                 length: text.chars().count() as i32,
                 text,
                 timestamp: now,
-                source_app: self.source_app.clone(),
+                source: EventSource::App(self.source_app.clone()),
             })
             .collect()
     }
@@ -148,6 +148,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             instant: Instant::now(),
             window_class: APP.to_string(),
+            window_pid: None,
             window_title: String::new(),
         }
     }
@@ -172,7 +173,9 @@ mod tests {
 
         let events = settled(&mut tracker, "Notes so far. the world is here", Instant::now());
 
-        assert!(events.iter().all(|e| e.start_pos == 4 && e.source_app == APP));
+        assert!(events
+            .iter()
+            .all(|e| e.start_pos == 4 && e.source == EventSource::App(APP.into())));
         assert_eq!(pairs(injected, &events), [("word".to_string(), "world".to_string())]);
     }
 

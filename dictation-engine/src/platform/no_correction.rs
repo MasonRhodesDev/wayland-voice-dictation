@@ -9,7 +9,8 @@ impl CorrectionLearning {
         Self
     }
 
-    pub fn record_injection(&mut self, _text: &str, _window_class: &str) {}
+    pub fn record_injection(&mut self, _text: &str, _window_class: &str, _window_pid: Option<u32>) {
+    }
 
     pub fn snapshot(&self) {
         warn!(

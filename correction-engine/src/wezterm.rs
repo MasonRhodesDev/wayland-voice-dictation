@@ -1,6 +1,6 @@
 use crate::store::CorrectionStore;
 use crate::types::{
-    CorrectionPair, InjectionContext, MonitorConfig, TextChangeEvent, TextChangeOp,
+    CorrectionPair, EventSource, InjectionContext, MonitorConfig, TextChangeEvent, TextChangeOp,
 };
 use anyhow::{Context as AnyhowContext, Result};
 use async_trait::async_trait;
@@ -352,7 +352,7 @@ pub fn diff_revision(
                 length: deleted.chars().count() as i32,
                 text: deleted,
                 timestamp: now,
-                source_app: "wezterm".to_string(),
+                source: EventSource::App("wezterm".to_string()),
             });
         }
         if !inserted.is_empty() {
@@ -362,7 +362,7 @@ pub fn diff_revision(
                 length: inserted.chars().count() as i32,
                 text: inserted,
                 timestamp: now,
-                source_app: "wezterm".to_string(),
+                source: EventSource::App("wezterm".to_string()),
             });
         }
     }
@@ -634,6 +634,7 @@ mod tests {
             timestamp: Utc::now(),
             instant: Instant::now(),
             window_class: WEZTERM_WINDOW_CLASS.to_string(),
+            window_pid: None,
             window_title: "wezterm".to_string(),
         }
     }

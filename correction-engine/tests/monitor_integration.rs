@@ -2,12 +2,16 @@ use chrono::Utc;
 use correction_engine::connection::MockTextChangeSource;
 use correction_engine::store::CorrectionStore;
 use correction_engine::types::{
-    CorrectionStats, EventScope, InjectionContext, MonitorConfig, TextChangeEvent, TextChangeOp,
+    CorrectionStats, EventScope, EventSource, InjectionContext, MonitorConfig, TextChangeEvent,
+    TextChangeOp,
 };
 use correction_engine::CorrectionMonitor;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+const FOCUSED_PID: u32 = 4242;
+const OTHER_PID: u32 = 5151;
 
 fn make_config(dir: &std::path::Path, duration_secs: u64, threshold: u32) -> MonitorConfig {
     MonitorConfig {
@@ -26,6 +30,7 @@ fn make_context(text: &str) -> InjectionContext {
         timestamp: Utc::now(),
         instant: Instant::now(),
         window_class: "test-app".to_string(),
+        window_pid: None,
         window_title: "Test Window".to_string(),
     }
 }
@@ -37,16 +42,24 @@ fn make_event(op: TextChangeOp, pos: i32, text: &str) -> TextChangeEvent {
         length: text.chars().count() as i32,
         text: text.to_string(),
         timestamp: Instant::now(),
-        source_app: "test-app".to_string(),
+        source: EventSource::App("test-app".to_string()),
     }
 }
 
 fn atspi_context(text: &str) -> InjectionContext {
-    InjectionContext { window_class: String::new(), ..make_context(text) }
+    InjectionContext {
+        window_class: "firefox".to_string(),
+        window_pid: Some(FOCUSED_PID),
+        ..make_context(text)
+    }
 }
 
 fn atspi_event(op: TextChangeOp, pos: i32, text: &str) -> TextChangeEvent {
-    TextChangeEvent { source_app: ":1.3".to_string(), ..make_event(op, pos, text) }
+    atspi_event_from(FOCUSED_PID, op, pos, text)
+}
+
+fn atspi_event_from(pid: u32, op: TextChangeOp, pos: i32, text: &str) -> TextChangeEvent {
+    TextChangeEvent { source: EventSource::Process(pid), ..make_event(op, pos, text) }
 }
 
 fn pair(original: &str, corrected: &str) -> (String, String) {
@@ -206,6 +219,89 @@ async fn a_single_word_fix_is_recorded() {
 
     assert_eq!(pairs, [pair("cash", "cache")]);
     assert_eq!(stats.total_corrections, 1);
+}
+
+#[tokio::test]
+async fn a_fix_in_the_focused_window_is_recorded() {
+    let dir = TempDir::new().unwrap();
+    let config = make_config(dir.path(), 1, 3);
+
+    let (pairs, stats) = learn(
+        &config,
+        atspi_context("the cash is here"),
+        vec![
+            atspi_event_from(OTHER_PID, TextChangeOp::Insert, 0, "make test"),
+            atspi_event(TextChangeOp::Delete, 4, "cash"),
+            atspi_event_from(OTHER_PID, TextChangeOp::Delete, 0, "the cash is here"),
+            atspi_event(TextChangeOp::Insert, 4, "cache"),
+        ],
+    )
+    .await;
+
+    assert_eq!(pairs, [pair("cash", "cache")]);
+    assert_eq!(stats.total_corrections, 1);
+}
+
+#[tokio::test]
+async fn an_edit_in_another_application_records_nothing() {
+    let dir = TempDir::new().unwrap();
+    let config = make_config(dir.path(), 1, 3);
+
+    let (pairs, stats) = learn(
+        &config,
+        atspi_context("the cash is here"),
+        vec![
+            atspi_event_from(OTHER_PID, TextChangeOp::Delete, 4, "cash"),
+            atspi_event_from(OTHER_PID, TextChangeOp::Insert, 4, "cache"),
+        ],
+    )
+    .await;
+
+    assert_eq!(pairs, []);
+    assert_eq!(stats.total_corrections, 0);
+}
+
+#[tokio::test]
+async fn an_edit_records_nothing_when_the_focused_window_has_no_process_id() {
+    let dir = TempDir::new().unwrap();
+    let config = make_config(dir.path(), 1, 3);
+    let context = InjectionContext { window_pid: None, ..atspi_context("the cash is here") };
+
+    let (pairs, stats) = learn(
+        &config,
+        context,
+        vec![
+            atspi_event(TextChangeOp::Delete, 4, "cash"),
+            atspi_event(TextChangeOp::Insert, 4, "cache"),
+        ],
+    )
+    .await;
+
+    assert_eq!(pairs, []);
+    assert_eq!(stats.total_corrections, 0);
+}
+
+#[tokio::test]
+async fn a_fix_is_recorded_when_the_focused_window_is_unknown() {
+    let dir = TempDir::new().unwrap();
+    let config = make_config(dir.path(), 1, 3);
+    let context = InjectionContext {
+        window_class: String::new(),
+        window_pid: None,
+        ..make_context("the cash is here")
+    };
+
+    let (pairs, _) = learn(
+        &config,
+        context,
+        vec![
+            atspi_event(TextChangeOp::Delete, 4, "cash"),
+            atspi_event(TextChangeOp::Insert, 4, "cache"),
+        ],
+    )
+    .await;
+
+    assert_eq!(pairs, [pair("cash", "cache")]);
 }
 
 #[tokio::test]

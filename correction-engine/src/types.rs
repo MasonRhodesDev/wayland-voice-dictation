@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -9,6 +10,7 @@ pub struct InjectionContext {
     pub timestamp: DateTime<Utc>,
     pub instant: Instant,
     pub window_class: String,
+    pub window_pid: Option<u32>,
     pub window_title: String,
 }
 
@@ -79,7 +81,22 @@ pub struct TextChangeEvent {
     pub length: i32,
     pub text: String,
     pub timestamp: Instant,
-    pub source_app: String,
+    pub source: EventSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EventSource {
+    Process(u32),
+    App(String),
+}
+
+impl fmt::Display for EventSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Process(pid) => write!(f, "pid {pid}"),
+            Self::App(app) => f.write_str(app),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
