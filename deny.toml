@@ -54,5 +54,4 @@ allow-git = [
     "https://github.com/MasonRhodesDev/schema-tui.git",
     "https://github.com/iovxw/ksni.git",
     "https://github.com/MasonRhodesDev/hypr-slint-runtime",
-    "https://github.com/MasonRhodesDev/rust-platform-kit",
 ]

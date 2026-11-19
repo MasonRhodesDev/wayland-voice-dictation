@@ -7329,8 +7329,9 @@ dependencies = [
 
 [[package]]
 name = "rust-platform-kit"
-version = "0.1.0"
-source = "git+https://github.com/MasonRhodesDev/rust-platform-kit?tag=v0.1.0#a8bf464b4930f765028faacfd7c087ec8e6e6da0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40aef723d07b6fd7549fa639e2f5517f5520c95373d05e6b6c6a9548079d17f5"
 dependencies = [
  "block2 0.6.2",
  "core-foundation 0.10.1",
