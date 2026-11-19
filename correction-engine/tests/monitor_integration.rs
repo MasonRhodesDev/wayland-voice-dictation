@@ -209,6 +209,29 @@ async fn a_single_word_fix_is_recorded() {
 }
 
 #[tokio::test]
+async fn a_fix_in_the_focused_window_is_recorded() {
+    let dir = TempDir::new().unwrap();
+    let config = make_config(dir.path(), 1, 3);
+    let context = InjectionContext {
+        window_class: "firefox".to_string(),
+        ..make_context("the cash is here")
+    };
+
+    let (pairs, stats) = learn(
+        &config,
+        context,
+        vec![
+            atspi_event(TextChangeOp::Delete, 4, "cash"),
+            atspi_event(TextChangeOp::Insert, 4, "cache"),
+        ],
+    )
+    .await;
+
+    assert_eq!(pairs, [pair("cash", "cache")]);
+    assert_eq!(stats.total_corrections, 1);
+}
+
+#[tokio::test]
 async fn sending_a_dictated_chat_message_records_nothing() {
     let dir = TempDir::new().unwrap();
     let config = make_config(dir.path(), 1, 3);
