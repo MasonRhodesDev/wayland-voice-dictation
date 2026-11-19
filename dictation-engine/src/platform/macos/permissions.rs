@@ -34,7 +34,11 @@ pub(super) fn can_post_events() -> bool {
 }
 
 pub fn missing_permissions() -> Vec<Permission> {
-    NEEDED.into_iter().filter(|gate| kit::access(*gate) == Access::Denied).map(describe).collect()
+    NEEDED
+        .into_iter()
+        .filter(|gate| matches!(kit::access(*gate), Access::Denied | Access::Restricted))
+        .map(describe)
+        .collect()
 }
 
 pub fn request_permissions() -> Vec<Permission> {
