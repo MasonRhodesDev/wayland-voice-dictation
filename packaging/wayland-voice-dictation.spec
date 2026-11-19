@@ -26,7 +26,6 @@ BuildRequires:  fontconfig-devel
 BuildRequires:  freetype-devel
 BuildRequires:  libxkbcommon-devel
 BuildRequires:  wayland-devel
-BuildRequires:  systemd-devel
 Requires:       wtype
 Requires:       pipewire
 Requires:       onnxruntime

@@ -2,17 +2,16 @@ mod control;
 #[cfg(feature = "correction")]
 pub(super) mod correction;
 mod focus;
-mod idle;
 mod ime_probe;
 mod keyboard;
 #[cfg(feature = "tray")]
 mod tray;
 
 use anyhow::{Context, Result};
+use sd_notify::NotifyState;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use systemd::daemon::{notify, STATE_READY, STATE_WATCHDOG};
 use tokio::sync::{broadcast, mpsc};
 use tracing::info;
 
@@ -23,7 +22,6 @@ use crate::{GuiControl, GuiStatus};
 pub use super::no_tray::spawn_tray;
 pub use control::{daemon_exe, daemon_running, send_request, serve_control, ControlServer};
 pub use focus::FocusTarget;
-pub use idle::{inhibit_idle, IdleInhibitor};
 pub use ime_probe::run as run_ime_probe;
 pub use keyboard::type_text_with_progress;
 #[cfg(feature = "tray")]
@@ -51,12 +49,12 @@ pub fn resume_media(_paused: PausedMedia) {
 }
 
 pub fn notify_ready() -> Result<()> {
-    notify(false, [(STATE_READY, "1")].iter())?;
+    sd_notify::notify(&[NotifyState::Ready])?;
     Ok(())
 }
 
 pub fn notify_watchdog() -> Result<()> {
-    notify(false, [(STATE_WATCHDOG, "1")].iter())?;
+    sd_notify::notify(&[NotifyState::Watchdog])?;
     Ok(())
 }
 
