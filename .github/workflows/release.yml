@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    uses: MasonRhodesDev/packaging-workflows/.github/workflows/release.yml@v1
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/release.yml@3d0c5630674f086918226d0140c51b97887c799f # v1
     secrets: inherit
     with:
       spec-name: wayland-voice-dictation

@@ -11,9 +11,9 @@ concurrency:
 
 jobs:
   arch:
-    uses: MasonRhodesDev/packaging-workflows/.github/workflows/arch-package.yml@v1
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/arch-package.yml@3d0c5630674f086918226d0140c51b97887c799f # v1
 
   rpm:
-    uses: MasonRhodesDev/packaging-workflows/.github/workflows/rpm-check.yml@v1
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/rpm-check.yml@3d0c5630674f086918226d0140c51b97887c799f # v1
     with:
       spec-name: wayland-voice-dictation
