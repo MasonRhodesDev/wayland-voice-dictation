@@ -9,6 +9,7 @@ use crate::engine::TranscriptionEngine;
 
 const MIN_AUDIO_SAMPLES: usize = 2400;
 const RETRANSCRIBE_THRESHOLD: usize = 4800;
+const STFT_WINDOW_SAMPLES: usize = 400;
 
 pub struct ParakeetEngine {
     parakeet: Arc<Mutex<ParakeetTDT>>,
@@ -81,8 +82,8 @@ impl ParakeetEngine {
     }
 
     fn transcribe_buffer(&self, samples: &[i16]) -> Result<String> {
-        if samples.is_empty() {
-            debug!("transcribe_buffer: empty samples");
+        if samples.len() < STFT_WINDOW_SAMPLES {
+            debug!("transcribe_buffer: {} samples is shorter than one STFT window", samples.len());
             return Ok(String::new());
         }
 

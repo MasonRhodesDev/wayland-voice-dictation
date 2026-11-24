@@ -153,6 +153,18 @@ fn emit(
     }
 }
 
+fn transcribe_catching_panics(model: &dyn LocalModel, audio: &[i16]) -> Result<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| model.transcribe(audio)))
+        .unwrap_or_else(|panic| {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            anyhow::bail!("model panicked on {} samples: {message}", audio.len())
+        })
+}
+
 fn run_worker(
     model: Arc<dyn LocalModel>,
     buffer: Arc<Mutex<Vec<i16>>>,
@@ -175,7 +187,7 @@ fn run_worker(
                         break;
                     }
                 };
-                match model.transcribe(&audio) {
+                match transcribe_catching_panics(model.as_ref(), &audio) {
                     Ok(text) => {
                         debug!("driver: final at {} samples -> {:?}", audio.len(), text);
                         emit(&event_tx, TranscriptEvent::Final(text));
@@ -203,7 +215,7 @@ fn run_worker(
                 };
 
                 if let Some((audio, cur)) = pending {
-                    match model.transcribe(&audio) {
+                    match transcribe_catching_panics(model.as_ref(), &audio) {
                         Ok(text) => {
                             last_len = cur;
                             debug!("driver: partial at {} samples -> {:?}", cur, text);
@@ -242,6 +254,18 @@ mod tests {
     impl LocalModel for FailModel {
         fn transcribe(&self, _samples: &[i16]) -> Result<String> {
             anyhow::bail!("boom")
+        }
+    }
+
+    struct PanicOnceModel {
+        calls: AtomicUsize,
+    }
+    impl LocalModel for PanicOnceModel {
+        fn transcribe(&self, samples: &[i16]) -> Result<String> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("model panicked");
+            }
+            Ok(format!("len={}", samples.len()))
         }
     }
 
@@ -299,6 +323,25 @@ mod tests {
         driver.finish();
         let ev = timeout(RECV_TIMEOUT, rx.recv()).await.expect("error timed out").expect("closed");
         assert!(matches!(ev, TranscriptEvent::Error(_)), "got {ev:?}");
+    }
+
+    #[tokio::test]
+    async fn model_panic_surfaces_as_error_and_worker_survives() {
+        let driver =
+            LocalEngineDriver::new(Arc::new(PanicOnceModel { calls: AtomicUsize::new(0) }));
+        let mut rx = driver.subscribe();
+
+        driver.process_audio(&[0i16; 100]).unwrap();
+        driver.finish();
+        let ev = timeout(RECV_TIMEOUT, rx.recv()).await.expect("error timed out").expect("closed");
+        assert!(matches!(ev, TranscriptEvent::Error(_)), "got {ev:?}");
+
+        driver.reset();
+        let mut rx = driver.subscribe();
+        driver.process_audio(&[0i16; 100]).unwrap();
+        driver.finish();
+        let ev = timeout(RECV_TIMEOUT, rx.recv()).await.expect("final timed out").expect("closed");
+        assert!(matches!(ev, TranscriptEvent::Final(ref t) if t == "len=100"), "got {ev:?}");
     }
 
     #[test]
