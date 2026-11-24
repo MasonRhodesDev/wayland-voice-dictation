@@ -3,7 +3,7 @@
 %global __cargo_common_opts %{?_smp_mflags} -Z avoid-dev-deps --locked
 
 Name:           wayland-voice-dictation
-Version:        0.8.2
+Version:        0.8.3
 Release:        1%{?dist}
 Obsoletes:      hyprland-voice-dictation < 0.6.0
 Provides:       hyprland-voice-dictation = %{version}-%{release}
@@ -79,6 +79,11 @@ install -Dpm0755 scripts/download-parakeet-model.sh %{buildroot}%{_datadir}/%{na
 %{_datadir}/%{name}/download-parakeet-model.sh
 
 %changelog
+* Tue Nov 24 2026 Mason Rhodes <mrhodesdev@gmail.com> - 0.8.3-1
+- Ending a dictation no longer crashes the daemon on Linux. The idle
+  inhibitor's blocking D-Bus connection was dropped on the async runtime,
+  which panicked and left systemd's watchdog to abort the daemon.
+
 * Tue Nov 24 2026 Mason Rhodes <mrhodesdev@gmail.com> - 0.8.2-1
 - A dictation shorter than 25 ms no longer panics the Parakeet engine, and a
   panic in any local model surfaces as an error instead of leaving dictation
