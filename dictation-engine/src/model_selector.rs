@@ -101,6 +101,7 @@ impl ModelSpec {
         } else {
             path.join("encoder-model.onnx").exists()
                 && path.join("decoder_joint-model.onnx").exists()
+                && path.join("vocab.txt").exists()
         }
     }
 

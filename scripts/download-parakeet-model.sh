@@ -8,6 +8,7 @@ FILES=(
     "encoder-model.onnx"
     "encoder-model.onnx.data"
     "decoder_joint-model.onnx"
+    "vocab.txt"
 )
 
 mkdir -p "$MODEL_DIR"

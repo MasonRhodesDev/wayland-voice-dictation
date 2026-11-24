@@ -360,6 +360,7 @@ fn validate_and_prompt_models(_config_path: &PathBuf) -> Result<(), Box<dyn std:
     let parakeet_dir = models_dir.join("parakeet");
     if !parakeet_dir.join("encoder-model.onnx").exists()
         || !parakeet_dir.join("decoder_joint-model.onnx").exists()
+        || !parakeet_dir.join("vocab.txt").exists()
     {
         eprintln!("Parakeet model not found at {:?}", parakeet_dir);
         eprintln!("The Parakeet model is required for speech recognition.");
@@ -953,10 +954,12 @@ fn diagnose() -> Result<(), Box<dyn std::error::Error>> {
     let models_dir = PathBuf::from(&home).join(".config/voice-dictation/models/parakeet");
     let encoder_exists = models_dir.join("encoder-model.onnx").exists();
     let decoder_exists = models_dir.join("decoder_joint-model.onnx").exists();
+    let vocab_exists = models_dir.join("vocab.txt").exists();
     println!("\nParakeet model:");
     println!("  Directory: {}", models_dir.display());
     println!("  Encoder:   {}", if encoder_exists { "found" } else { "MISSING" });
     println!("  Decoder:   {}", if decoder_exists { "found" } else { "MISSING" });
+    println!("  Vocab:     {}", if vocab_exists { "found" } else { "MISSING" });
 
     let debug_enabled = std::env::var("VOICE_DICTATION_DEBUG_AUDIO")
         .map(|v| v == "1" || v.to_lowercase() == "true")
@@ -997,7 +1000,7 @@ fn download_model() -> Result<(), Box<dyn std::error::Error>> {
     const BASE_URL: &str =
         "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main";
     const FILES: &[&str] =
-        &["encoder-model.onnx", "encoder-model.onnx.data", "decoder_joint-model.onnx"];
+        &["encoder-model.onnx", "encoder-model.onnx.data", "decoder_joint-model.onnx", "vocab.txt"];
 
     println!("Model directory: {}", model_dir.display());
     println!("Source: {}", BASE_URL);
