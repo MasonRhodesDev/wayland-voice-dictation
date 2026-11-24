@@ -86,6 +86,7 @@ install -Dpm0755 scripts/download-parakeet-model.sh %{buildroot}%{_datadir}/%{na
 - Idle inhibit goes through keepawake and systemd readiness through
   sd-notify, so systemd-devel is no longer a build dependency.
 - macOS permission checks come from rust-platform-kit 0.2.
+- url 2.5.9 for RUSTSEC-2026-0592.
 
 * Thu Nov 19 2026 Mason Rhodes <mrhodesdev@gmail.com> - 0.8.0-1
 - macOS support behind a per-OS platform layer. Linux keeps its D-Bus
